@@ -6,7 +6,7 @@ Semantic code search CLI using ChromaDB + Ollama. Integrates with Claude Code vi
 
 ![Greppy Demo](experiment.gif)
 
-*Video sped up 3x. With Greppy: 37s | Without Greppy: 1m 20s*
+*Video sped up 5x. With Greppy: 37s | Without Greppy: 1m 20s*
 
 ## Architecture
 
