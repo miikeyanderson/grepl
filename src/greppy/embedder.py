@@ -12,13 +12,19 @@ def get_embeddings(texts: List[str], model: str = DEFAULT_MODEL) -> List[List[fl
     embeddings = []
 
     for text in texts:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": model, "prompt": text},
-            timeout=30,
-        )
-        response.raise_for_status()
-        embeddings.append(response.json()["embedding"])
+        try:
+            # Truncate very long texts that may cause issues
+            truncated = text[:8000] if len(text) > 8000 else text
+            response = requests.post(
+                f"{OLLAMA_BASE_URL}/api/embeddings",
+                json={"model": model, "prompt": truncated},
+                timeout=60,
+            )
+            response.raise_for_status()
+            embeddings.append(response.json()["embedding"])
+        except requests.exceptions.RequestException:
+            # Return zero embedding for problematic texts
+            embeddings.append([0.0] * 768)
 
     return embeddings
 
