@@ -240,3 +240,25 @@ Greppy stores indexes in `~/.greppy/chroma/`. Each project gets its own collecti
 - **ChromaDB**: Embedded vector database (no server)
 - **Ollama**: Local embeddings via nomic-embed-text
 - **Python**: Simple, portable CLI
+
+## Experiments
+
+Benchmarks comparing Greppy vs standard Claude Code exploration are in the `experiments/` folder.
+
+### Chart Generation Search (2026-01-07)
+
+Task: Find all code related to chart generation logic in the datafeeds project.
+
+| Metric | With Greppy | Without Greppy |
+|--------|-------------|----------------|
+| Duration | 1m 16s | 2m 26s |
+| Tokens | 400 | 15,309 |
+| Cost | $0.02 | $0.44 |
+
+**Result: Greppy was 2x faster and 22x cheaper.**
+
+### Why Is It So Much Cheaper?
+
+**Without Greppy**, the LLM has to *read actual file contents* to understand what's in them. It issues Glob/Grep commands, reads files, processes them, searches more, reads more files. All that file content goes into the context window, burning through tokens. The LLM is essentially reading your entire codebase to find what it's looking for.
+
+**With Greppy**, Ollama does the semantic search *locally* (free, no tokens). ChromaDB returns relevant file paths and snippets. The LLM only sees the search results—a few lines per match—not entire files.
