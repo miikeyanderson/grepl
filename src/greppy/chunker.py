@@ -17,9 +17,10 @@ CODE_EXTENSIONS = {
 
 # Directories to skip
 SKIP_DIRS = {
-    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "node_modules", ".git", "__pycache__", ".venv", "venv", "myenv", "env",
     "dist", "build", ".next", ".nuxt", "target",
     ".idea", ".vscode", "vendor", ".cache",
+    "data", "research_data", "research_data2",  # Large data directories
 }
 
 # Max chunk size in characters
@@ -46,8 +47,17 @@ def hash_content(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
+# Files to skip
+SKIP_FILES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock", "composer.lock",
+}
+
+
 def should_index_file(file_path: Path) -> bool:
     """Check if file should be indexed."""
+    if file_path.name in SKIP_FILES:
+        return False
     return file_path.suffix.lower() in CODE_EXTENSIONS
 
 
