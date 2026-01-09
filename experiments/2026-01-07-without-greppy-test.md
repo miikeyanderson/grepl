@@ -1,4 +1,4 @@
-# Without Greppy Test
+# Without Grepl Test
 
 **Task**: Find all the code related to chart generation logic
 
@@ -20,7 +20,7 @@ Used Claude Code's Task tool with `subagent_type=Explore` to search the codebase
 
 ## Notes
 
-- This serves as a baseline comparison for the same task performed with Greppy
+- This serves as a baseline comparison for the same task performed with Grepl
 
 ---
 

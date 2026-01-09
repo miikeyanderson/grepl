@@ -1,4 +1,4 @@
-# Greppy Implementation Plan v3
+# Grepl Implementation Plan v3
 
 ## Overview
 
@@ -14,18 +14,18 @@ Integrate **claude-context** (Zilliz's semantic search engine) into Claude Code 
 │                                                               │
 │  1. User: "Find authentication logic"                         │
 │  2. Claude matches → code-search Skill activates              │
-│  3. Skill instructs: use greppy CLI via Bash                  │
-│  4. Claude runs: Bash("greppy search 'authentication'")       │
+│  3. Skill instructs: use grepl CLI via Bash                  │
+│  4. Claude runs: Bash("grepl search 'authentication'")       │
 │                                                               │
 └───────────────────────────┬───────────────────────────────────┘
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                 Greppy CLI (thin wrapper)                     │
+│                 Grepl CLI (thin wrapper)                     │
 │                                                               │
-│  greppy index .              # Index codebase                 │
-│  greppy search "query"       # Semantic search                │
-│  greppy exact "pattern"      # Exact match (ripgrep)          │
+│  grepl index .              # Index codebase                 │
+│  grepl search "query"       # Semantic search                │
+│  grepl exact "pattern"      # Exact match (ripgrep)          │
 │                                                               │
 └───────────────────────────┬───────────────────────────────────┘
                             │
@@ -63,21 +63,21 @@ Zilliz's open-source semantic code search engine. Provides:
 
 GitHub: https://github.com/zilliztech/claude-context
 
-### 2. Greppy CLI (Wrapper)
+### 2. Grepl CLI (Wrapper)
 
 A thin CLI that wraps claude-context's functionality for Bash invocation.
 
 ```bash
 # Commands
-greppy index [path]           # → calls claude-context index_codebase
-greppy search "query" -n 10   # → calls claude-context search_code
-greppy exact "pattern"        # → falls back to ripgrep
-greppy status                 # → calls claude-context get_indexing_status
+grepl index [path]           # → calls claude-context index_codebase
+grepl search "query" -n 10   # → calls claude-context search_code
+grepl exact "pattern"        # → falls back to ripgrep
+grepl status                 # → calls claude-context get_indexing_status
 ```
 
 ### 3. Code Search Skill
 
-A Skill that teaches Claude to use greppy for code exploration.
+A Skill that teaches Claude to use grepl for code exploration.
 
 ### 4. Grep Blocking Hook
 
@@ -112,15 +112,15 @@ docker run -d --name milvus \
 npm install -g @zilliz/claude-context
 ```
 
-### Step 3: Install Greppy CLI (Wrapper)
+### Step 3: Install Grepl CLI (Wrapper)
 
 ```bash
-pip install greppy
+pip install grepl
 # or
-pipx install greppy
+pipx install grepl
 ```
 
-The greppy CLI wraps claude-context and exposes it as simple bash commands.
+The grepl CLI wraps claude-context and exposes it as simple bash commands.
 
 ### Step 4: Create the Skill
 
@@ -130,19 +130,19 @@ The greppy CLI wraps claude-context and exposes it as simple bash commands.
 ---
 name: code-search
 description: Semantic code search for finding code by meaning. Use when searching for concepts, logic, patterns, or asking "where is X handled" or "find code that does Y".
-allowed-tools: Bash(greppy:*), Read, Glob
+allowed-tools: Bash(grepl:*), Read, Glob
 ---
 
 # Code Search Skill
 
 ## When to Use This Skill
 
-Use `greppy` for:
+Use `grepl` for:
 - Finding code by concept ("authentication logic", "error handling")
 - Exploring unfamiliar codebases
 - Searching by intent, not exact text
 
-Use `greppy exact` for:
+Use `grepl exact` for:
 - Specific strings, function names, imports
 - TODOs, FIXMEs, exact patterns
 
@@ -150,38 +150,38 @@ Use `greppy exact` for:
 
 ### Index (first time only)
 ```bash
-greppy index .
+grepl index .
 ```
 
 ### Semantic Search
 ```bash
-greppy search "your query" -n 10
+grepl search "your query" -n 10
 ```
 
 ### Exact Match
 ```bash
-greppy exact "pattern"
+grepl exact "pattern"
 ```
 
 ### Check Status
 ```bash
-greppy status
+grepl status
 ```
 
 ## Examples
 
 | Task | Command |
 |------|---------|
-| Find auth logic | `greppy search "authentication"` |
-| Find error handling | `greppy search "error handling patterns"` |
-| Find specific function | `greppy exact "def processPayment"` |
-| Find all TODOs | `greppy exact "TODO"` |
+| Find auth logic | `grepl search "authentication"` |
+| Find error handling | `grepl search "error handling patterns"` |
+| Find specific function | `grepl exact "def processPayment"` |
+| Find all TODOs | `grepl exact "TODO"` |
 
 ## Workflow
 
-1. Check if index exists: `greppy status`
-2. If not indexed: `greppy index .`
-3. Search: `greppy search "your query"`
+1. Check if index exists: `grepl status`
+2. If not indexed: `grepl index .`
+3. Search: `grepl search "your query"`
 4. Read returned files for more context
 
 ## Output Format
@@ -205,13 +205,13 @@ src/middleware/auth.ts:12: export const requireAuth = ...
     "PreToolUse": [
       {
         "matcher": "Grep",
-        "command": "echo 'BLOCKED: Use the code-search Skill instead. Run: greppy search \"query\" for semantic search, or greppy exact \"pattern\" for exact matches.'",
+        "command": "echo 'BLOCKED: Use the code-search Skill instead. Run: grepl search \"query\" for semantic search, or grepl exact \"pattern\" for exact matches.'",
         "decision": "block"
       }
     ]
   },
   "permissions": {
-    "allow": ["Bash(greppy:*)"]
+    "allow": ["Bash(grepl:*)"]
   }
 }
 ```
@@ -221,11 +221,11 @@ src/middleware/auth.ts:12: export const requireAuth = ...
 ```markdown
 ## Code Search
 
-This project uses `greppy` for code search. The `code-search` Skill handles this automatically.
+This project uses `grepl` for code search. The `code-search` Skill handles this automatically.
 
 **Do not use grep directly** — it is blocked. Use:
-- `greppy search "query"` for semantic/concept search
-- `greppy exact "pattern"` for exact string matching
+- `grepl search "query"` for semantic/concept search
+- `grepl exact "pattern"` for exact string matching
 ```
 
 ---
@@ -259,11 +259,11 @@ User: "Find where users are authenticated"
                   ▼
 ┌─────────────────────────────────────┐
 │  Skill loads, instructs Claude to   │
-│  use greppy via Bash                │
+│  use grepl via Bash                │
 └─────────────────┬───────────────────┘
                   │
                   ▼
-    Bash("greppy search 'authentication'")
+    Bash("grepl search 'authentication'")
                   │
                   ▼
         Results returned to Claude
@@ -280,10 +280,10 @@ Claude tries: Grep("auth")
     Hook blocks it
         │
         ▼
-    Message: "Use greppy instead"
+    Message: "Use grepl instead"
         │
         ▼
-    Claude adapts, uses greppy
+    Claude adapts, uses grepl
 ```
 
 ---
@@ -293,7 +293,7 @@ Claude tries: Grep("auth")
 | Component | Cost |
 |-----------|------|
 | claude-context | $0 (open source) |
-| Greppy CLI wrapper | $0 (open source) |
+| Grepl CLI wrapper | $0 (open source) |
 | Ollama | $0 (local) |
 | Milvus | $0 (local Docker) |
 | **Total** | **$0** |
@@ -316,7 +316,7 @@ Claude tries: Grep("auth")
 
 1. **Install backend** (Ollama + Milvus) — 15 minutes
 2. **Install claude-context** — 5 minutes
-3. **Build greppy CLI wrapper** — 2-4 hours
+3. **Build grepl CLI wrapper** — 2-4 hours
    - Thin wrapper that calls claude-context via its Node.js API
    - Formats output for grep-like display
 4. **Create Skill** — 30 minutes
@@ -338,7 +338,7 @@ You: "Find where errors are logged"
 
 Expected:
 1. Claude activates code-search Skill
-2. Runs: greppy search "error logging"
+2. Runs: grepl search "error logging"
 3. Returns relevant code snippets
 4. Reads files for more context if needed
 ```
@@ -348,7 +348,7 @@ You: "Find all TODO comments"
 
 Expected:
 1. Claude activates code-search Skill
-2. Runs: greppy exact "TODO"
+2. Runs: grepl exact "TODO"
 3. Returns exact matches
 ```
 
@@ -359,8 +359,8 @@ Expected:
 | Issue | Fix |
 |-------|-----|
 | Skill not activating | Check description matches query; restart Claude |
-| greppy not found | Ensure it's in PATH; check `which greppy` |
-| Index missing | Run `greppy index .` first |
+| grepl not found | Ensure it's in PATH; check `which grepl` |
+| Index missing | Run `grepl index .` first |
 | Hook not blocking | Verify `.claude/settings.json` syntax |
 | Results not relevant | Re-index; try different query phrasing |
 | Ollama not running | `ollama serve` |

@@ -1,4 +1,4 @@
-# Greppy Implementation Plan v2
+# Grepl Implementation Plan v2
 
 ## Overview
 
@@ -22,17 +22,17 @@ Build a local CLI tool that replaces grep in Claude Code via hook-based blocking
 │  │  PreToolUse Hook                    │                    │
 │  │  matcher: "Grep"                    │                    │
 │  │  decision: BLOCK                    │                    │
-│  │  message: "Use greppy instead"      │                    │
+│  │  message: "Use grepl instead"      │                    │
 │  └─────────────────────────────────────┘                    │
 │                      │                                       │
 │                      ▼                                       │
-│  Claude adapts: Bash("greppy search 'authentication'")      │
+│  Claude adapts: Bash("grepl search 'authentication'")      │
 │                      │                                       │
 └──────────────────────┼──────────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Greppy CLI                                │
+│                    Grepl CLI                                │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
@@ -45,7 +45,7 @@ Build a local CLI tool that replaces grep in Claude Code via hook-based blocking
 │         │                   │                   │           │
 │         ▼                   ▼                   ▼           │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │              Local Storage (~/.greppy/)              │   │
+│  │              Local Storage (~/.grepl/)              │   │
 │  │                                                      │   │
 │  │  ChromaDB (vectors)  +  Tantivy (BM25)  +  SQLite   │   │
 │  └─────────────────────────────────────────────────────┘   │
@@ -61,24 +61,24 @@ Build a local CLI tool that replaces grep in Claude Code via hook-based blocking
 
 ```bash
 # Indexing
-greppy index [path]              # Index a directory (default: current)
-greppy index --watch [path]      # Index and watch for changes
-greppy status                    # Show index status
-greppy clear [path]              # Clear index for a path
+grepl index [path]              # Index a directory (default: current)
+grepl index --watch [path]      # Index and watch for changes
+grepl status                    # Show index status
+grepl clear [path]              # Clear index for a path
 
 # Searching
-greppy search <query> [options]  # Semantic search (default)
-greppy exact <pattern> [options] # Exact pattern match (ripgrep wrapper)
+grepl search <query> [options]  # Semantic search (default)
+grepl exact <pattern> [options] # Exact pattern match (ripgrep wrapper)
 
 # Configuration
-greppy config                    # Show current config
-greppy config set <key> <value>  # Update config
+grepl config                    # Show current config
+grepl config set <key> <value>  # Update config
 ```
 
 ### Search Options
 
 ```bash
-greppy search "authentication logic" \
+grepl search "authentication logic" \
   --top 10           # Number of results (default: 10)
   --threshold 0.5    # Minimum similarity score
   --path ./src       # Limit to directory
@@ -290,11 +290,11 @@ class IndexHandler(FileSystemEventHandler):
 ## Project Structure
 
 ```
-greppy/
+grepl/
 ├── pyproject.toml
 ├── README.md
 ├── src/
-│   └── greppy/
+│   └── grepl/
 │       ├── __init__.py
 │       ├── cli.py              # Click/Typer CLI
 │       ├── chunker.py          # Tree-sitter chunking
@@ -329,14 +329,14 @@ greppy/
     "PreToolUse": [
       {
         "matcher": "Grep",
-        "command": "echo 'BLOCKED: grep is disabled. Use: greppy search \"<query>\" for semantic search, or greppy exact \"<pattern>\" for exact matches.'",
+        "command": "echo 'BLOCKED: grep is disabled. Use: grepl search \"<query>\" for semantic search, or grepl exact \"<pattern>\" for exact matches.'",
         "decision": "block"
       }
     ]
   },
   "permissions": {
     "allow": [
-      "Bash(greppy:*)"
+      "Bash(grepl:*)"
     ]
   }
 }
@@ -347,27 +347,27 @@ greppy/
 ```markdown
 ## Code Search
 
-This project uses `greppy` for code search. grep is disabled.
+This project uses `grepl` for code search. grep is disabled.
 
 ### Commands
 
-- `greppy search "<query>"` - Semantic search (use for concepts, logic, intent)
-- `greppy exact "<pattern>"` - Exact pattern match (use for specific strings, symbols)
-- `greppy status` - Check if index is current
+- `grepl search "<query>"` - Semantic search (use for concepts, logic, intent)
+- `grepl exact "<pattern>"` - Exact pattern match (use for specific strings, symbols)
+- `grepl status` - Check if index is current
 
 ### Examples
 
 | Task | Command |
 |------|---------|
-| Find authentication logic | `greppy search "authentication"` |
-| Find all TODO comments | `greppy exact "TODO"` |
-| Find where errors are handled | `greppy search "error handling"` |
-| Find specific function | `greppy exact "def processPayment"` |
+| Find authentication logic | `grepl search "authentication"` |
+| Find all TODO comments | `grepl exact "TODO"` |
+| Find where errors are handled | `grepl search "error handling"` |
+| Find specific function | `grepl exact "def processPayment"` |
 
 ### When to Use Which
 
-- **Semantic** (`greppy search`): "How does X work?", "Where is Y handled?", concepts
-- **Exact** (`greppy exact`): Specific strings, function names, imports, TODOs
+- **Semantic** (`grepl search`): "How does X work?", "Where is Y handled?", concepts
+- **Exact** (`grepl exact`): Specific strings, function names, imports, TODOs
 ```
 
 ---
@@ -376,7 +376,7 @@ This project uses `greppy` for code search. grep is disabled.
 
 ```toml
 [project]
-name = "greppy"
+name = "grepl"
 version = "0.1.0"
 requires-python = ">=3.10"
 
@@ -409,12 +409,12 @@ bm25 = [
 - [ ] Tree-sitter chunking (Python + JS/TS)
 - [ ] Sentence-transformers embedding
 - [ ] ChromaDB storage
-- [ ] Basic `greppy index` and `greppy search`
+- [ ] Basic `grepl index` and `grepl search`
 - [ ] grep-like output format
-- [ ] `greppy exact` (ripgrep wrapper)
+- [ ] `grepl exact` (ripgrep wrapper)
 - [ ] Claude Code hook setup
 
-**Deliverable**: Can run `greppy search "auth logic"` and get useful results
+**Deliverable**: Can run `grepl search "auth logic"` and get useful results
 
 ### Phase 2: Hybrid Search (1 day)
 
@@ -472,7 +472,7 @@ bm25 = [
 ### Integration Tests
 - Index a sample repo, search, verify results
 - Incremental reindex after file change
-- Hook blocks grep and suggests greppy
+- Hook blocks grep and suggests grepl
 
 ### Benchmark Tests
 - Token usage comparison vs grep workflow
@@ -486,7 +486,7 @@ bm25 = [
 1. **Token Reduction**: 40%+ fewer tokens vs grep workflow
 2. **Speed**: End-to-end search <1 second
 3. **Quality**: Finds relevant code on first try >80% of time
-4. **Reliability**: Claude uses greppy 100% of time (hook enforced)
+4. **Reliability**: Claude uses grepl 100% of time (hook enforced)
 5. **Cost**: $0 ongoing (fully local)
 
 ---

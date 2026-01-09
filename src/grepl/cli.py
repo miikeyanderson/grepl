@@ -1,8 +1,10 @@
-"""Greppy CLI - Semantic code search."""
+"""Grepl CLI - Semantic code search."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict, List, Optional
 
 import click
 from rich.console import Console
@@ -12,6 +14,12 @@ from . import __version__
 from .embedder import check_ollama, check_model
 from .chunker import chunk_codebase
 from .store import index_chunks, search, clear_index, get_stats, has_index
+from .utils.formatters import (
+    format_search_result,
+    format_json_output,
+    grouped_output,
+    create_file_header,
+)
 
 console = Console()
 
@@ -19,7 +27,7 @@ console = Console()
 @click.group()
 @click.version_option(version=__version__)
 def main():
-    """Greppy - Semantic code search powered by ChromaDB + Ollama."""
+    """Grepl - Semantic code search powered by ChromaDB + Ollama."""
     pass
 
 
@@ -83,7 +91,8 @@ def index(path: str, force: bool):
 @click.argument("query")
 @click.option("--limit", "-n", default=10, help="Number of results")
 @click.option("--path", "-p", default=".", type=click.Path(exists=True), help="Project path")
-def search_cmd(query: str, limit: int, path: str):
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+def search_cmd(query: str, limit: int, path: str, json_output: bool):
     """Semantic search across indexed codebase."""
     project_path = Path(path).resolve()
 
@@ -95,23 +104,26 @@ def search_cmd(query: str, limit: int, path: str):
 
     if not has_index(project_path):
         console.print("[yellow]Codebase not indexed.[/yellow]")
-        console.print(f"Run: [cyan]greppy index {path}[/cyan]")
+        console.print(f"Run: [cyan]grepl index {path}[/cyan]")
         sys.exit(1)
 
     results = search(project_path, query, limit)
+
+    if json_output:
+        # JSON output mode
+        format_json_output(results, raw=True)
+        return
 
     if not results:
         console.print("No results found.")
         return
 
-    # Print results in grep-like format
+    # Print results with enhanced formatting
     for r in results:
-        score = f"[dim](score: {r['score']:.2f})[/dim]"
-        location = f"[cyan]{r['file_path']}:{r['start_line']}[/cyan]"
+        format_search_result(r, show_multiline=True, max_lines=3)
 
-        # Show first line of content
-        first_line = r["content"].split("\n")[0][:100]
-        console.print(f"{location}: {first_line} {score}")
+    # Summary footer
+    console.print(f"\n[dim]Found {len(results)} results[/dim]")
 
 
 # Alias 'search' command since Click doesn't allow 'search' as function name
@@ -123,7 +135,8 @@ main.add_command(search_cmd, name="search")
 @click.option("--limit", "-n", default=None, type=int, help="Max number of results")
 @click.option("--ignore-case", "-i", is_flag=True, help="Case-insensitive search")
 @click.option("--path", "-p", default=".", help="Path to search")
-def exact(pattern: str, limit: int, ignore_case: bool, path: str):
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+def exact(pattern: str, limit: int, ignore_case: bool, path: str, json_output: bool):
     """Exact pattern search (uses ripgrep/grep)."""
     try:
         # Try ripgrep first
@@ -143,9 +156,61 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str):
                 # Limit total lines of output
                 lines = output.strip().split("\n")
                 output = "\n".join(lines[:limit])
-            print(output)
+            
+            if json_output:
+                # Parse and output as JSON
+                results = []
+                for line in output.strip().split("\n"):
+                    if ":" not in line:
+                        continue
+                    file_path, line_num, *content_parts = line.split(":", 2)
+                    if content_parts:
+                        content = content_parts[0]
+                    else:
+                        content = ""
+                    results.append({
+                        "path": file_path,
+                        "line": int(line_num),
+                        "content": content,
+                    })
+                format_json_output(results, raw=True)
+            else:
+                # Parse and group by file
+                matches_by_file: Dict[str, List[str]] = {}
+                for line in output.strip().split("\n"):
+                    if ":" not in line:
+                        continue
+                    file_path, line_num, *content_parts = line.split(":", 2)
+                    if file_path not in matches_by_file:
+                        matches_by_file[file_path] = []
+                    if content_parts:
+                        content = content_parts[0]
+                    else:
+                        content = ""
+                    decorated_match = f"[cyan]{line_num}[/cyan]: {content}"
+                    matches_by_file[file_path].append(decorated_match)
+
+                # Print grouped output
+                for file_path, matches in matches_by_file.items():
+                    console.print()
+                    header = create_file_header(file_path)
+                    panel = Panel(
+                        "\n".join(matches),
+                        title=header,
+                        border_style="blue",
+                        padding=(0, 1),
+                    )
+                    console.print(panel)
+
+                # Summary footer
+                total_matches = sum(len(matches) for matches in matches_by_file.values())
+                console.print(f"\n[dim]Found {total_matches} matches in {len(matches_by_file)} file(s)[/dim]")
+
         elif result.returncode == 1:
-            print("No matches found.")
+            if json_output:
+                format_json_output([], raw=True)
+            else:
+                print("No matches found.")
         else:
             raise FileNotFoundError()
     except FileNotFoundError:
@@ -173,15 +238,18 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str):
 @main.command()
 @click.argument("location")
 @click.option("--context", "-c", default=50, help="Lines of context (default: 50)")
-def read(location: str, context: int):
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+def read(location: str, context: int, json_output: bool):
     """Read file contents with context around a line.
 
     Usage:
-        greppy read src/auth.py              # Read first 50 lines
-        greppy read src/auth.py:45           # Read ~50 lines centered on line 45
-        greppy read src/auth.py:30-80        # Read lines 30-80
-        greppy read src/auth.py -c 100       # More context
+        grepl read src/auth.py              # Read first 50 lines
+        grepl read src/auth.py:45           # Read ~50 lines centered on line 45
+        grepl read src/auth.py:30-80        # Read lines 30-80
+        grepl read src/auth.py -c 100       # More context
     """
+    from .utils.formatters import syntax_highlight_code, truncate_line
+
     # Parse location: file.py, file.py:line, or file.py:start-end
     if ":" in location:
         file_part, line_part = location.rsplit(":", 1)
@@ -229,14 +297,46 @@ def read(location: str, context: int):
     start_line = max(1, start_line)
     end_line = min(total_lines, end_line)
 
-    # Print header
-    console.print(f"[dim]# {file_path} (lines {start_line}-{end_line} of {total_lines})[/dim]")
+    # Prepare JSON output if requested
+    if json_output:
+        json_data = {
+            "path": str(file_path),
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "lines": []
+        }
 
-    # Print lines with line numbers
+        for i in range(start_line - 1, end_line):
+            line_num = i + 1
+            line_content = lines[i].rstrip("\n\r")
+            json_data["lines"].append({
+                "num": line_num,
+                "content": line_content
+            })
+
+        format_json_output(json_data, raw=True)
+        return
+
+    # Pretty output with syntax highlighting
+    console.print(f"[bold][cyan]{file_path}[/cyan][/bold] [dim](lines {start_line}-{end_line} of {total_lines})[/dim]")
+    console.print()
+
     for i in range(start_line - 1, end_line):
         line_num = i + 1
         line_content = lines[i].rstrip("\n\r")
-        print(f"{line_num:6}\t{line_content}")
+        
+        # Apply syntax highlighting to each line
+        highlighted = syntax_highlight_code(line_content, str(file_path))
+        
+        # Truncate overly long lines
+        if len(line_content) > 120:
+            truncated = truncate_line(line_content, max_length=120)
+            if truncated != line_content:
+                highlighted = syntax_highlight_code(truncated, str(file_path))
+        
+        # Print with line number
+        console.print(f"[dim]{line_num:6}[/dim]  {highlighted}")
 
 
 @main.command()
@@ -253,7 +353,7 @@ def status(path: str):
     else:
         console.print(f"[yellow]No index found[/yellow]")
         console.print(f"  Project: {stats['project']}")
-        console.print(f"Run: [cyan]greppy index {path}[/cyan]")
+        console.print(f"Run: [cyan]grepl index {path}[/cyan]")
 
 
 @main.command()

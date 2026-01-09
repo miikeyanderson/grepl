@@ -1,4 +1,4 @@
-# Greppy Implementation Analysis
+# Grepl Implementation Analysis
 
 ## Problem Statement
 
@@ -167,7 +167,7 @@ Total: ~10,000 tokens
 ### Core Stack
 
 ```
-greppy/
+grepl/
 ├── chunker.py        # Tree-sitter code-aware chunking
 ├── embedder.py       # Local embedding model
 ├── vector_store.py   # ChromaDB for semantic search

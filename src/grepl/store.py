@@ -10,8 +10,8 @@ from chromadb.config import Settings
 from .chunker import CodeChunk
 from .embedder import get_embeddings, get_embedding
 
-# Store data in ~/.greppy
-GREPPY_DIR = Path.home() / ".greppy"
+# Store data in ~/.grepl
+GREPPY_DIR = Path.home() / ".grepl"
 CHROMA_DIR = GREPPY_DIR / "chroma"
 
 

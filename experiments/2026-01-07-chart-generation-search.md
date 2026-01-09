@@ -1,4 +1,4 @@
-# Greppy Experiment: Chart Generation Search
+# Grepl Experiment: Chart Generation Search
 
 **Date:** 2026-01-07
 **Task:** Find all code related to chart generation logic
@@ -16,12 +16,12 @@
 
 ## Queries Used
 
-1. `greppy search "chart generation logic"`
-2. `greppy search "chart rendering D3 visualization" -n 20`
-3. `greppy exact "CHART_REGISTRY"`
-4. `greppy search "D3 chart component render SVG" -n 15`
-5. `greppy exact "D3ChartRenderer"`
-6. `greppy exact "ChartView"`
+1. `grepl search "chart generation logic"`
+2. `grepl search "chart rendering D3 visualization" -n 20`
+3. `grepl exact "CHART_REGISTRY"`
+4. `grepl search "D3 chart component render SVG" -n 15`
+5. `grepl exact "D3ChartRenderer"`
+6. `grepl exact "ChartView"`
 
 ## Results Summary
 
@@ -72,6 +72,6 @@
 
 ## Notes
 
-- Used a combination of semantic search (`greppy search`) and exact match (`greppy exact`) to cover both conceptual and specific code references
+- Used a combination of semantic search (`grepl search`) and exact match (`grepl exact`) to cover both conceptual and specific code references
 - 6 queries were sufficient to map out the entire chart generation architecture
 - Total cost under $0.03 for comprehensive codebase exploration

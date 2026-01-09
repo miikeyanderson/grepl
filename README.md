@@ -1,17 +1,17 @@
-# Greppy
+# Grepl
 
 Semantic code search CLI using ChromaDB + Ollama. Integrates with Claude Code via Skills.
 
 **No Docker required.** Everything runs locally.
 
-![Greppy Demo](experiment.gif)
+![Grepl Demo](experiment.gif)
 
-*Video sped up 5x. With Greppy: 37s | Without Greppy: 1m 20s*
+*Video sped up 5x. With Grepl: 37s | Without Grepl: 1m 20s*
 
 ## Architecture
 
 ```
-Claude Code → Skill → greppy CLI → ChromaDB + Ollama
+Claude Code → Skill → grepl CLI → ChromaDB + Ollama
                       (Python)     (embedded)  (local)
 ```
 
@@ -30,106 +30,106 @@ ollama serve
 ollama pull nomic-embed-text
 ```
 
-### 2. Install Greppy
+### 2. Install Grepl
 
 **Option A: Via Homebrew (recommended)**
 ```bash
-brew tap dyoburon/greppy
-brew install greppy
+brew tap dyoburon/grepl
+brew install grepl
 ```
 
 **Option B: Via pip**
 ```bash
-pip install -e /path/to/greppy
+pip install -e /path/to/grepl
 ```
 
 **Option C: Via pipx**
 ```bash
-pipx install /path/to/greppy
+pipx install /path/to/grepl
 ```
 
 ### 3. Verify Installation
 
 ```bash
-greppy --help
+grepl --help
 ```
 
 ### 4. Index Your Codebase
 
 ```bash
 cd /path/to/your/project
-greppy index .
+grepl index .
 ```
 
 ### 5. Search!
 
 ```bash
-greppy search "authentication logic"
-greppy search "error handling" -n 20
-greppy exact "TODO"  # Exact pattern match
-greppy read src/auth.py:45  # Read context around line 45
+grepl search "authentication logic"
+grepl search "error handling" -n 20
+grepl exact "TODO"  # Exact pattern match
+grepl read src/auth.py:45  # Read context around line 45
 ```
 
 ## Usage
 
 ### Index a Codebase
 ```bash
-greppy index .
-greppy index /path/to/project
-greppy index . --force  # Reindex
+grepl index .
+grepl index /path/to/project
+grepl index . --force  # Reindex
 ```
 
 ### Semantic Search
 ```bash
-greppy search "authentication logic"
-greppy search "how errors are handled" -n 20
-greppy search "database queries" -p /path/to/project
+grepl search "authentication logic"
+grepl search "how errors are handled" -n 20
+grepl search "database queries" -p /path/to/project
 ```
 
 ### Exact Pattern Match
 ```bash
-greppy exact "TODO"
-greppy exact "def process_payment"
-greppy exact "import React" -p ./src
-greppy exact -i "error" -p ./src      # Case-insensitive
-greppy exact "foo|bar|baz" -n 20      # Multiple patterns (OR)
+grepl exact "TODO"
+grepl exact "def process_payment"
+grepl exact "import React" -p ./src
+grepl exact -i "error" -p ./src      # Case-insensitive
+grepl exact "foo|bar|baz" -n 20      # Multiple patterns (OR)
 ```
 
 ### Read Files
 ```bash
-greppy read src/auth.py              # Read first 50 lines
-greppy read src/auth.py:45           # Read ~50 lines centered on line 45
-greppy read src/auth.py:30-80        # Read lines 30-80
-greppy read src/auth.py -c 100       # Read 100 lines of context
+grepl read src/auth.py              # Read first 50 lines
+grepl read src/auth.py:45           # Read ~50 lines centered on line 45
+grepl read src/auth.py:30-80        # Read lines 30-80
+grepl read src/auth.py -c 100       # Read 100 lines of context
 ```
 
-## For LLMs: grep/sed → greppy Cheatsheet
+## For LLMs: grep/sed → grepl Cheatsheet
 
-If you're an LLM (Claude Code, etc.), use greppy instead of grep/sed/cat. Here's the mapping:
+If you're an LLM (Claude Code, etc.), use grepl instead of grep/sed/cat. Here's the mapping:
 
 | Instead of | Use |
 |------------|-----|
-| `grep -n "pattern" file` | `greppy exact "pattern" -p file` |
-| `grep -in "pattern" file` | `greppy exact -i "pattern" -p file` |
-| `grep -n "a\|b\|c" file` | `greppy exact "a\|b\|c" -p file` |
-| `grep -rn "pattern" dir` | `greppy exact "pattern" -p dir` |
-| `sed -n '10,50p' file` | `greppy read file:10-50` |
-| `cat file \| head -50` | `greppy read file` |
-| `cat file` | `greppy read file -c 1000` |
+| `grep -n "pattern" file` | `grepl exact "pattern" -p file` |
+| `grep -in "pattern" file` | `grepl exact -i "pattern" -p file` |
+| `grep -n "a\|b\|c" file` | `grepl exact "a\|b\|c" -p file` |
+| `grep -rn "pattern" dir` | `grepl exact "pattern" -p dir` |
+| `sed -n '10,50p' file` | `grepl read file:10-50` |
+| `cat file \| head -50` | `grepl read file` |
+| `cat file` | `grepl read file -c 1000` |
 
 ### Key Flags
 
 ```bash
-greppy exact [OPTIONS] PATTERN
+grepl exact [OPTIONS] PATTERN
   -p, --path TEXT      Path to search (file or directory, default: .)
   -n, --limit INTEGER  Max number of results
   -i, --ignore-case    Case-insensitive search
 
-greppy search [OPTIONS] QUERY
+grepl search [OPTIONS] QUERY
   -p, --path TEXT      Project path (default: .)
   -n, --limit INTEGER  Number of results (default: 10)
 
-greppy read LOCATION
+grepl read LOCATION
   file.py              # First 50 lines
   file.py:45           # ~50 lines centered on line 45
   file.py:30-80        # Lines 30-80
@@ -138,13 +138,13 @@ greppy read LOCATION
 
 ### Check Status
 ```bash
-greppy status
-greppy status /path/to/project
+grepl status
+grepl status /path/to/project
 ```
 
 ### Clear Index
 ```bash
-greppy clear
+grepl clear
 ```
 
 ## Claude Code Integration
@@ -159,7 +159,7 @@ Create a `.claude` folder in your project with these files:
 {
   "permissions": {
     "allow": [
-      "Bash(greppy:*)"
+      "Bash(grepl:*)"
     ],
     "deny": [
       "Glob",
@@ -171,7 +171,7 @@ Create a `.claude` folder in your project with these files:
 }
 ```
 
-This blocks Claude's native search/read tools, forcing it to use greppy for all code operations.
+This blocks Claude's native search/read tools, forcing it to use grepl for all code operations.
 
 #### 2. `.claude/skills/code-search/SKILL.md`
 
@@ -179,23 +179,23 @@ This blocks Claude's native search/read tools, forcing it to use greppy for all 
 ---
 name: code-search
 description: Semantic code search for finding code by meaning. Use when searching for concepts, logic, patterns, or asking "where is X handled" or "find code that does Y".
-allowed-tools: Bash(greppy:*)
+allowed-tools: Bash(grepl:*)
 ---
 
 # Code Search Skill
 
 ## When to Use This Skill
 
-Use `greppy search` for:
+Use `grepl search` for:
 - Finding code by concept ("authentication logic", "error handling")
 - Exploring unfamiliar codebases
 - Searching by intent, not exact text
 
-Use `greppy exact` for:
+Use `grepl exact` for:
 - Specific strings, function names, imports
 - TODOs, FIXMEs, exact patterns
 
-Use `greppy read` for:
+Use `grepl read` for:
 - Reading file contents after finding a match
 - Viewing context around a specific line
 
@@ -203,18 +203,18 @@ Use `greppy read` for:
 
 ### Semantic Search
 \`\`\`bash
-greppy search "your query" -n 10
+grepl search "your query" -n 10
 \`\`\`
 
 ### Exact Match
 \`\`\`bash
-greppy exact "pattern"
+grepl exact "pattern"
 \`\`\`
 
 ### Read File
 \`\`\`bash
-greppy read file.py:45    # Context around line 45
-greppy read file.py:30-80 # Lines 30-80
+grepl read file.py:45    # Context around line 45
+grepl read file.py:30-80 # Lines 30-80
 \`\`\`
 ```
 
@@ -225,17 +225,17 @@ Add this to your project's `CLAUDE.md` file:
 ```markdown
 ## Code Search - IMPORTANT
 
-**Always use `greppy` for all code operations in this codebase.** Do NOT use Glob, Grep, Read, or the Explore agent.
+**Always use `grepl` for all code operations in this codebase.** Do NOT use Glob, Grep, Read, or the Explore agent.
 
 \`\`\`bash
 # Semantic search (find by meaning/concept)
-greppy search "authentication logic"
+grepl search "authentication logic"
 
 # Exact pattern match
-greppy exact "def process_payment"
+grepl exact "def process_payment"
 
 # Read file contents
-greppy read src/auth.py:45
+grepl read src/auth.py:45
 \`\`\`
 
 The index is already built. Just run the search commands directly.
@@ -243,10 +243,10 @@ The index is already built. Just run the search commands directly.
 
 ### Quick Setup (Copy Files)
 
-Or simply copy the `.claude` folder from greppy:
+Or simply copy the `.claude` folder from grepl:
 
 ```bash
-cp -r /path/to/greppy/.claude /path/to/your/project/
+cp -r /path/to/grepl/.claude /path/to/your/project/
 ```
 
 Then restart Claude Code to load the settings.
@@ -255,19 +255,19 @@ Then restart Claude Code to load the settings.
 
 **Layer 1: Permissions (Enforcement)** - Native tools are denied in settings.json:
 ```
-Claude tries Grep/Glob/Read → DENIED → Must use greppy instead
+Claude tries Grep/Glob/Read → DENIED → Must use grepl instead
 ```
 
-**Layer 2: Skill (Guidance)** - The skill teaches Claude when and how to use greppy:
+**Layer 2: Skill (Guidance)** - The skill teaches Claude when and how to use grepl:
 ```
-"find authentication logic" → Skill matches → greppy search "authentication"
+"find authentication logic" → Skill matches → grepl search "authentication"
 ```
 
-**Layer 3: CLAUDE.md (Instruction)** - Explicit instruction to use greppy for all code operations
+**Layer 3: CLAUDE.md (Instruction)** - Explicit instruction to use grepl for all code operations
 
 ## Data Storage
 
-Greppy stores indexes in `~/.greppy/chroma/`. Each project gets its own collection.
+Grepl stores indexes in `~/.grepl/chroma/`. Each project gets its own collection.
 
 ## Keeping Ollama Running (Recommended)
 
@@ -279,7 +279,7 @@ If you use [Hammerspoon](https://www.hammerspoon.org/), add this to your `~/.ham
 
 ```lua
 -- Ollama Keepalive
--- Ensures Ollama is always running for greppy
+-- Ensures Ollama is always running for grepl
 
 local ollamaPath = "/opt/homebrew/bin/ollama"  -- Apple Silicon
 -- local ollamaPath = "/usr/local/bin/ollama"  -- Intel Mac
@@ -349,8 +349,8 @@ Download from [ollama.com](https://ollama.com). The desktop app runs as a menu b
 |-------|-----|
 | Ollama not running | `ollama serve` (or see "Keeping Ollama Running" above) |
 | Model not found | `ollama pull nomic-embed-text` |
-| greppy not found | `brew tap dyoburon/greppy && brew install greppy` |
-| Index missing | `greppy index .` |
+| grepl not found | `brew tap dyoburon/grepl && brew install grepl` |
+| Index missing | `grepl index .` |
 | Skill not activating | Restart Claude Code |
 
 ## Cost
@@ -369,22 +369,22 @@ Download from [ollama.com](https://ollama.com). The desktop app runs as a menu b
 
 ## Experiments
 
-Benchmarks comparing Greppy vs standard Claude Code exploration are in the `experiments/` folder.
+Benchmarks comparing Grepl vs standard Claude Code exploration are in the `experiments/` folder.
 
 ### Chart Generation Search (2026-01-07)
 
 Task: Find all code related to chart generation logic in the datafeeds project.
 
-| Metric | With Greppy | Without Greppy |
+| Metric | With Grepl | Without Grepl |
 |--------|-------------|----------------|
 | Duration | 1m 16s | 2m 26s |
 | Tokens | 400 | 15,309 |
 | Cost | $0.02 | $0.44 |
 
-**Result: Greppy was 2x faster and 22x cheaper.**
+**Result: Grepl was 2x faster and 22x cheaper.**
 
 ### Why Is It So Much Cheaper?
 
-**Without Greppy**, the LLM has to *read actual file contents* to understand what's in them. It issues Glob/Grep commands, reads files, processes them, searches more, reads more files. All that file content goes into the context window, burning through tokens. The LLM is essentially reading your entire codebase to find what it's looking for.
+**Without Grepl**, the LLM has to *read actual file contents* to understand what's in them. It issues Glob/Grep commands, reads files, processes them, searches more, reads more files. All that file content goes into the context window, burning through tokens. The LLM is essentially reading your entire codebase to find what it's looking for.
 
-**With Greppy**, Ollama does the semantic search *locally* (free, no tokens). ChromaDB returns relevant file paths and snippets. The LLM only sees the search results—a few lines per match—not entire files.
+**With Grepl**, Ollama does the semantic search *locally* (free, no tokens). ChromaDB returns relevant file paths and snippets. The LLM only sees the search results—a few lines per match—not entire files.
