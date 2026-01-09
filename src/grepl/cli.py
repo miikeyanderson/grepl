@@ -8,18 +8,27 @@ from typing import Dict, List, Optional
 
 import click
 from rich.console import Console
-from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
 from .embedder import check_ollama, check_model
 from .chunker import chunk_codebase
 from .store import index_chunks, search, clear_index, get_stats, has_index
-from .utils.formatters import (
-    format_search_result,
-    format_json_output,
-    grouped_output,
-    create_file_header,
+from .utils.formatters import format_json_output
+from .utils.tree_formatter import (
+    format_exact_results,
+    format_search_results,
+    format_read_output,
+    format_status_output,
+    format_index_header,
+    format_index_progress,
+    format_error,
+    badge,
+    cyan,
+    green,
+    yellow,
+    dim,
+    Colors,
 )
 
 console = Console()
@@ -39,96 +48,94 @@ def index(path: str, force: bool):
     """Index a codebase for semantic search."""
     project_path = Path(path).resolve()
 
+    # Print header
+    print(format_index_header(project_path))
+    print()
+
     # Check prerequisites
     if not check_ollama():
-        console.print("[red]Error: Ollama is not running.[/red]")
-        console.print("Start it with: [cyan]ollama serve[/cyan]")
+        format_error("Ollama is not running", hint=f"Start with: {cyan('ollama serve')}")
         sys.exit(1)
 
     if not check_model():
-        console.print("[red]Error: Model 'nomic-embed-text' not found.[/red]")
-        console.print("Pull it with: [cyan]ollama pull nomic-embed-text[/cyan]")
+        format_error("Model 'nomic-embed-text' not found", hint=f"Pull with: {cyan('ollama pull nomic-embed-text')}")
         sys.exit(1)
 
     # Check if already indexed
     if has_index(project_path) and not force:
         stats = get_stats(project_path)
-        console.print(f"[yellow]Index already exists with {stats['chunks']} chunks.[/yellow]")
-        console.print("Use [cyan]--force[/cyan] to reindex.")
+        print(f"  {yellow('!')} Index already exists with {cyan(str(stats['chunks']))} chunks")
+        print(f"  {dim('Use')} {cyan('--force')} {dim('to reindex')}")
         return
 
-    console.print(f"[blue]Indexing {project_path}...[/blue]")
-
     # Collect chunks
+    format_index_progress("Scanning files...")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
+        transient=True,
     ) as progress:
-        task = progress.add_task("Scanning files...", total=None)
-
+        task = progress.add_task("Scanning...", total=None)
         chunks = list(chunk_codebase(project_path))
         progress.update(task, description=f"Found {len(chunks)} chunks")
 
+    format_index_progress(f"Found {len(chunks)} chunks", done=True)
+
     if not chunks:
-        console.print("[yellow]No files found to index.[/yellow]")
+        print(f"  {yellow('!')} No files found to index")
         return
 
     # Index chunks
+    format_index_progress("Generating embeddings...")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
+        transient=True,
     ) as progress:
         task = progress.add_task("Indexing...", total=None)
+        index_chunks(project_path, chunks)
+        progress.update(task, description="Done")
 
-        total = index_chunks(project_path, chunks)
-        progress.update(task, description=f"Indexed {total} chunks")
+    format_index_progress(f"Indexed {len(chunks)} chunks", done=True)
+    print()
+    print(f"  {green('Ready!')} Run {cyan('grepl search <query>')} to search")
 
-    console.print(f"[green]Done! Indexed {total} chunks.[/green]")
 
-
-@main.command()
+@main.command("search")
 @click.argument("query")
-@click.option("--limit", "-n", default=10, help="Number of results")
-@click.option("--path", "-p", default=".", type=click.Path(exists=True), help="Project path")
+@click.option("--limit", "-n", default=10, help="Number of results (default: 10)")
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
-def search_cmd(query: str, limit: int, path: str, json_output: bool):
+@click.option("--path", "-p", default=".", help="Path to search")
+def search_cmd(query: str, limit: int, json_output: bool, path: str):
     """Semantic search across indexed codebase."""
     project_path = Path(path).resolve()
 
     # Check prerequisites
     if not check_ollama():
-        console.print("[red]Error: Ollama is not running.[/red]")
-        console.print("Start it with: [cyan]ollama serve[/cyan]")
+        if json_output:
+            print(json.dumps({"error": "Ollama is not running"}))
+        else:
+            format_error("Ollama is not running", hint=f"Start with: {cyan('ollama serve')}")
         sys.exit(1)
 
     if not has_index(project_path):
-        console.print("[yellow]Codebase not indexed.[/yellow]")
-        console.print(f"Run: [cyan]grepl index {path}[/cyan]")
+        if json_output:
+            print(json.dumps({"error": "Codebase not indexed"}))
+        else:
+            format_error("Codebase not indexed", hint=f"Run: {cyan(f'grepl index {path}')}")
         sys.exit(1)
 
     results = search(project_path, query, limit)
 
     if json_output:
-        # JSON output mode
         format_json_output(results, raw=True)
         return
 
-    if not results:
-        console.print("No results found.")
-        return
-
-    # Print results with enhanced formatting
-    for r in results:
-        format_search_result(r, show_multiline=True, max_lines=3)
-
-    # Summary footer
-    console.print(f"\n[dim]Found {len(results)} results[/dim]")
-
-
-# Alias 'search' command since Click doesn't allow 'search' as function name
-main.add_command(search_cmd, name="search")
+    format_search_results(results, query, max_lines=3)
 
 
 @main.command()
@@ -154,66 +161,47 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str, json_output: b
         if result.returncode == 0:
             output = result.stdout
             if limit:
-                # Limit total lines of output
                 lines = output.strip().split("\n")
                 output = "\n".join(lines[:limit])
-            
+
+            # Parse results
+            matches_by_file: Dict[str, List[dict]] = {}
+            for line in output.strip().split("\n"):
+                if ":" not in line:
+                    continue
+                file_path, line_num, *content_parts = line.split(":", 2)
+                content = content_parts[0] if content_parts else ""
+
+                if file_path not in matches_by_file:
+                    matches_by_file[file_path] = []
+                matches_by_file[file_path].append({
+                    "line": int(line_num),
+                    "content": content,
+                })
+
             if json_output:
-                # Parse and output as JSON
+                # Flatten for JSON output
                 results = []
-                for line in output.strip().split("\n"):
-                    if ":" not in line:
-                        continue
-                    file_path, line_num, *content_parts = line.split(":", 2)
-                    if content_parts:
-                        content = content_parts[0]
-                    else:
-                        content = ""
-                    results.append({
-                        "path": file_path,
-                        "line": int(line_num),
-                        "content": content,
-                    })
+                for fp, matches in matches_by_file.items():
+                    for m in matches:
+                        results.append({
+                            "path": fp,
+                            "line": m["line"],
+                            "content": m["content"],
+                        })
                 format_json_output(results, raw=True)
             else:
-                # Parse and group by file
-                matches_by_file: Dict[str, List[str]] = {}
-                for line in output.strip().split("\n"):
-                    if ":" not in line:
-                        continue
-                    file_path, line_num, *content_parts = line.split(":", 2)
-                    if file_path not in matches_by_file:
-                        matches_by_file[file_path] = []
-                    if content_parts:
-                        content = content_parts[0]
-                    else:
-                        content = ""
-                    decorated_match = f"[cyan]{line_num}[/cyan]: {content}"
-                    matches_by_file[file_path].append(decorated_match)
-
-                # Print grouped output
-                for file_path, matches in matches_by_file.items():
-                    console.print()
-                    header = create_file_header(file_path)
-                    panel = Panel(
-                        "\n".join(matches),
-                        title=header,
-                        border_style="blue",
-                        padding=(0, 1),
-                    )
-                    console.print(panel)
-
-                # Summary footer
-                total_matches = sum(len(matches) for matches in matches_by_file.values())
-                console.print(f"\n[dim]Found {total_matches} matches in {len(matches_by_file)} file(s)[/dim]")
+                format_exact_results(matches_by_file, pattern)
 
         elif result.returncode == 1:
             if json_output:
                 format_json_output([], raw=True)
             else:
-                print("No matches found.")
+                label = badge("EXACT", Colors.BRIGHT_MAGENTA)
+                print(f"{label} {cyan(repr(pattern))} {dim('──')} {dim('0 matches')}")
         else:
             raise FileNotFoundError()
+
     except FileNotFoundError:
         # Fallback to grep
         cmd = ["grep", "-rn", pattern, path]
@@ -231,9 +219,40 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str, json_output: b
             if limit:
                 lines = output.strip().split("\n")
                 output = "\n".join(lines[:limit])
-            print(output)
+
+            # Parse for tree output
+            matches_by_file: Dict[str, List[dict]] = {}
+            for line in output.strip().split("\n"):
+                if ":" not in line:
+                    continue
+                file_path, line_num, *content_parts = line.split(":", 2)
+                content = content_parts[0] if content_parts else ""
+
+                if file_path not in matches_by_file:
+                    matches_by_file[file_path] = []
+                matches_by_file[file_path].append({
+                    "line": int(line_num) if line_num.isdigit() else 0,
+                    "content": content,
+                })
+
+            if json_output:
+                results = []
+                for fp, matches in matches_by_file.items():
+                    for m in matches:
+                        results.append({
+                            "path": fp,
+                            "line": m["line"],
+                            "content": m["content"],
+                        })
+                format_json_output(results, raw=True)
+            else:
+                format_exact_results(matches_by_file, pattern)
         else:
-            print("No matches found.")
+            if json_output:
+                format_json_output([], raw=True)
+            else:
+                label = badge("EXACT", Colors.BRIGHT_MAGENTA)
+                print(f"{label} {cyan(repr(pattern))} {dim('──')} {dim('0 matches')}")
 
 
 @main.command()
@@ -249,8 +268,6 @@ def read(location: str, context: int, json_output: bool):
         grepl read src/auth.py:30-80        # Read lines 30-80
         grepl read src/auth.py -c 100       # More context
     """
-    from .utils.formatters import syntax_highlight_code, truncate_line
-
     # Parse location: file.py, file.py:line, or file.py:start-end
     if ":" in location:
         file_part, line_part = location.rsplit(":", 1)
@@ -261,7 +278,7 @@ def read(location: str, context: int, json_output: bool):
                 start_line = int(start_str)
                 end_line = int(end_str)
             except ValueError:
-                console.print(f"[red]Invalid line range: {line_part}[/red]")
+                format_error(f"Invalid line range: {line_part}")
                 sys.exit(1)
         else:
             # Single line: file.py:45
@@ -282,14 +299,14 @@ def read(location: str, context: int, json_output: bool):
 
     file_path = Path(file_part)
     if not file_path.exists():
-        console.print(f"[red]File not found: {file_part}[/red]")
+        format_error(f"File not found: {file_part}")
         sys.exit(1)
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except Exception as e:
-        console.print(f"[red]Error reading file: {e}[/red]")
+        format_error(f"Error reading file: {e}")
         sys.exit(1)
 
     total_lines = len(lines)
@@ -298,46 +315,34 @@ def read(location: str, context: int, json_output: bool):
     start_line = max(1, start_line)
     end_line = min(total_lines, end_line)
 
-    # Prepare JSON output if requested
+    # Prepare line data
+    line_data = []
+    for i in range(start_line - 1, end_line):
+        line_num = i + 1
+        line_content = lines[i].rstrip("\n\r")
+        line_data.append({
+            "num": line_num,
+            "content": line_content
+        })
+
     if json_output:
         json_data = {
             "path": str(file_path),
             "start_line": start_line,
             "end_line": end_line,
             "total_lines": total_lines,
-            "lines": []
+            "lines": line_data
         }
-
-        for i in range(start_line - 1, end_line):
-            line_num = i + 1
-            line_content = lines[i].rstrip("\n\r")
-            json_data["lines"].append({
-                "num": line_num,
-                "content": line_content
-            })
-
         format_json_output(json_data, raw=True)
         return
 
-    # Pretty output with syntax highlighting
-    console.print(f"[bold][cyan]{file_path}[/cyan][/bold] [dim](lines {start_line}-{end_line} of {total_lines})[/dim]")
-    console.print()
-
-    for i in range(start_line - 1, end_line):
-        line_num = i + 1
-        line_content = lines[i].rstrip("\n\r")
-        
-        # Apply syntax highlighting to each line
-        highlighted = syntax_highlight_code(line_content, str(file_path))
-        
-        # Truncate overly long lines
-        if len(line_content) > 120:
-            truncated = truncate_line(line_content, max_length=120)
-            if truncated != line_content:
-                highlighted = syntax_highlight_code(truncated, str(file_path))
-        
-        # Print with line number
-        console.print(f"[dim]{line_num:6}[/dim]  {highlighted}")
+    format_read_output(
+        str(file_path),
+        line_data,
+        start_line,
+        end_line,
+        total_lines
+    )
 
 
 @main.command()
@@ -347,14 +352,11 @@ def status(path: str):
     project_path = Path(path).resolve()
     stats = get_stats(project_path)
 
-    if stats["exists"]:
-        console.print(f"[green]Index exists[/green]")
-        console.print(f"  Project: {stats['project']}")
-        console.print(f"  Chunks: {stats['chunks']}")
-    else:
-        console.print(f"[yellow]No index found[/yellow]")
-        console.print(f"  Project: {stats['project']}")
-        console.print(f"Run: [cyan]grepl index {path}[/cyan]")
+    format_status_output(
+        project_path=str(project_path),
+        indexed=stats["exists"],
+        chunks=stats.get("chunks", 0),
+    )
 
 
 @main.command()
@@ -363,7 +365,9 @@ def clear(path: str):
     """Clear the search index."""
     project_path = Path(path).resolve()
     clear_index(project_path)
-    console.print(f"[green]Index cleared for {project_path}[/green]")
+
+    label = badge("CLEAR", Colors.BRIGHT_YELLOW)
+    print(f"{label} {green('Index cleared for')} {cyan(str(project_path))}")
 
 
 if __name__ == "__main__":
