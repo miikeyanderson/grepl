@@ -91,6 +91,8 @@ greppy search "database queries" -p /path/to/project
 greppy exact "TODO"
 greppy exact "def process_payment"
 greppy exact "import React" -p ./src
+greppy exact -i "error" -p ./src      # Case-insensitive
+greppy exact "foo|bar|baz" -n 20      # Multiple patterns (OR)
 ```
 
 ### Read Files
@@ -99,6 +101,39 @@ greppy read src/auth.py              # Read first 50 lines
 greppy read src/auth.py:45           # Read ~50 lines centered on line 45
 greppy read src/auth.py:30-80        # Read lines 30-80
 greppy read src/auth.py -c 100       # Read 100 lines of context
+```
+
+## For LLMs: grep/sed → greppy Cheatsheet
+
+If you're an LLM (Claude Code, etc.), use greppy instead of grep/sed/cat. Here's the mapping:
+
+| Instead of | Use |
+|------------|-----|
+| `grep -n "pattern" file` | `greppy exact "pattern" -p file` |
+| `grep -in "pattern" file` | `greppy exact -i "pattern" -p file` |
+| `grep -n "a\|b\|c" file` | `greppy exact "a\|b\|c" -p file` |
+| `grep -rn "pattern" dir` | `greppy exact "pattern" -p dir` |
+| `sed -n '10,50p' file` | `greppy read file:10-50` |
+| `cat file \| head -50` | `greppy read file` |
+| `cat file` | `greppy read file -c 1000` |
+
+### Key Flags
+
+```bash
+greppy exact [OPTIONS] PATTERN
+  -p, --path TEXT      Path to search (file or directory, default: .)
+  -n, --limit INTEGER  Max number of results
+  -i, --ignore-case    Case-insensitive search
+
+greppy search [OPTIONS] QUERY
+  -p, --path TEXT      Project path (default: .)
+  -n, --limit INTEGER  Number of results (default: 10)
+
+greppy read LOCATION
+  file.py              # First 50 lines
+  file.py:45           # ~50 lines centered on line 45
+  file.py:30-80        # Lines 30-80
+  -c, --context INT    # Lines of context (default: 50)
 ```
 
 ### Check Status
