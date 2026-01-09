@@ -234,11 +234,85 @@ Claude tries Grep/Glob/Read → DENIED → Must use greppy instead
 
 Greppy stores indexes in `~/.greppy/chroma/`. Each project gets its own collection.
 
+## Keeping Ollama Running (Recommended)
+
+Ollama stops when your terminal closes or Mac sleeps. Here's how to keep it running automatically.
+
+### Option 1: Hammerspoon (macOS)
+
+If you use [Hammerspoon](https://www.hammerspoon.org/), add this to your `~/.hammerspoon/init.lua`:
+
+```lua
+-- Ollama Keepalive
+-- Ensures Ollama is always running for greppy
+
+local ollamaPath = "/opt/homebrew/bin/ollama"  -- Apple Silicon
+-- local ollamaPath = "/usr/local/bin/ollama"  -- Intel Mac
+
+local function isOllamaRunning()
+    local output, status = hs.execute("pgrep -x ollama")
+    return status
+end
+
+local function startOllama()
+    if not isOllamaRunning() then
+        hs.task.new(ollamaPath, nil, {"serve"}):start()
+    end
+end
+
+-- Start on launch
+startOllama()
+
+-- Check every 5 minutes
+hs.timer.doEvery(300, startOllama)
+
+-- Restart after wake from sleep
+hs.caffeinate.watcher.new(function(event)
+    if event == hs.caffeinate.watcher.systemDidWake then
+        hs.timer.doAfter(2, startOllama)
+    end
+end):start()
+```
+
+Then reload Hammerspoon: `hs -c "hs.reload()"`
+
+### Option 2: LaunchAgent (macOS)
+
+Create a LaunchAgent that auto-starts Ollama on login:
+
+```bash
+cat > ~/Library/LaunchAgents/com.ollama.serve.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ollama.serve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/ollama</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+launchctl load ~/Library/LaunchAgents/com.ollama.serve.plist
+```
+
+### Option 3: Ollama Desktop App
+
+Download from [ollama.com](https://ollama.com). The desktop app runs as a menu bar item and auto-starts on login.
+
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| Ollama not running | `ollama serve` |
+| Ollama not running | `ollama serve` (or see "Keeping Ollama Running" above) |
 | Model not found | `ollama pull nomic-embed-text` |
 | greppy not found | `brew tap dyoburon/greppy && brew install greppy` |
 | Index missing | `greppy index .` |
