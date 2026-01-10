@@ -401,6 +401,28 @@ def find_cmd(
     """
     start_time = time.time()
     project_path = Path(path).resolve()
+
+    # Validate path exists
+    if not project_path.exists():
+        if json_output:
+            print(json.dumps({
+                "error": "path_not_found",
+                "message": f"Path does not exist: {path}",
+                "path": str(project_path),
+            }))
+        else:
+            format_error_rich(
+                f"Path not found: {path}",
+                context=f"Tried to search in '{project_path}'",
+                why=["The specified path does not exist", "Path may be misspelled or relative to wrong directory"],
+                fixes=[
+                    f"grepl find {repr(query)} -p .",
+                    f"ls -la {project_path.parent}" if project_path.parent != project_path else "ls -la .",
+                ],
+                tip="Use '.' to search current directory, or provide full path",
+            )
+        sys.exit(ExitCode.PATH_ERROR)
+
     exts = _lang_to_exts(lang)
 
     # Resolve rule files before building plan
@@ -633,13 +655,58 @@ def find_cmd(
         return
 
     if not ranked:
+        # Provide diagnostic context about WHY no matches
+        diagnostics = []
         suggestions = []
+
+        # Check what searches actually ran
+        if plan.run_grep:
+            if not grep_hits:
+                diagnostics.append("Grep: No pattern matches found")
+            else:
+                diagnostics.append(f"Grep: {len(grep_hits)} initial matches (filtered out)")
+
+        if plan.run_semantic:
+            if not check_ollama():
+                diagnostics.append("Semantic: Ollama not running")
+                suggestions.append("ollama serve")
+            elif not has_index(project_path):
+                diagnostics.append(f"Semantic: Path not indexed")
+                suggestions.append(f"grepl index {path}")
+            elif not semantic_hits:
+                diagnostics.append("Semantic: No relevant code found")
+
+        if plan.run_ast:
+            if not ast_hits:
+                diagnostics.append("AST: No structural matches found")
+
+        # Build suggestions based on what failed
         if plan.grep_pattern:
             suggestions.append(f"grepl exact {repr(plan.grep_pattern)} -p {path}")
-        suggestions.append(f"grepl search {repr(query)} -p {path}")
-        if not has_index(project_path):
-            suggestions.append(f"grepl index {path}")
-        format_no_results(pattern=query, search_type="FIND", time_ms=elapsed_ms, suggestions=suggestions)
+        if plan.semantic_query:
+            suggestions.append(f"grepl search {repr(query)} -p {path}")
+
+        # Format output with diagnostics
+        if not json_output:
+            format_no_results(
+                pattern=query,
+                search_type="FIND",
+                time_ms=elapsed_ms,
+                suggestions=suggestions
+            )
+            if diagnostics:
+                console.print(f"\n  [dim]Diagnostics:[/dim]")
+                for diag in diagnostics:
+                    console.print(f"    [dim]• {diag}[/dim]")
+        else:
+            print(json.dumps({
+                "query": query,
+                "matches": 0,
+                "time_ms": elapsed_ms,
+                "diagnostics": diagnostics,
+                "suggestions": suggestions,
+            }))
+
         sys.exit(ExitCode.NO_MATCHES)
 
     format_find_results(

@@ -446,8 +446,8 @@ def format_error(message: str, hint: Optional[str] = None) -> None:
 class ExitCode:
     """Meaningful exit codes that help Claude understand what happened."""
     SUCCESS = 0           # Results found or operation succeeded
+    NO_MATCHES = 0        # Valid query, no matches (still success - query worked)
     PATTERN_ERROR = 1     # Pattern syntax error (fix pattern)
-    NO_MATCHES = 2        # Valid pattern, nothing found
     PATH_ERROR = 3        # Path doesn't exist (fix path)
     PERMISSION_ERROR = 4  # Permission denied
 
