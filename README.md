@@ -1,6 +1,6 @@
 # Grepl
 
-Semantic code search CLI using ChromaDB + Ollama. Integrates with Claude Code via Skills.
+Explainable code search for humans and AI. Combines semantic search (ChromaDB + Ollama), exact matching (ripgrep), and structural AST search (ast-grep).
 
 **No Docker required.** Everything runs locally.
 
@@ -103,6 +103,65 @@ grepl read src/auth.py:30-80        # Read lines 30-80
 grepl read src/auth.py -c 100       # Read 100 lines of context
 ```
 
+### Hybrid Search with AST (grepl find)
+
+The `find` command combines grep, semantic search, and AST structural matching for powerful code exploration.
+
+```bash
+# Basic hybrid search
+grepl find "error handling"                    # Combines grep + semantic
+grepl find "TopNavBar" --grep-only             # Fast grep only
+grepl find "auth flow" --semantic-only         # Semantic only
+
+# AST structural search (requires: brew install ast-grep)
+grepl find --ast "print($$$)" --ast-lang swift           # Find all print calls
+grepl find --ast "try { $$ }" --ast-lang swift -k 20     # Find try blocks
+grepl find "error" --ast "catch { $$ }" --ast-lang swift # Combine with text query
+
+# Use named rule files
+grepl find --ast-rule swift-no-print --ast-lang swift
+grepl find --ast-rule swift-try-catch --exhaustive       # Scan entire repo
+
+# Strategy presets
+grepl find --strategy codemod --ast "print($$)" --ast-lang swift  # Full repo AST
+grepl find "error" --strategy explore --ast "catch { $$ }"        # Narrow then AST
+
+# Preview execution plan without running
+grepl find "auth" --ast "guard let $$ else { return }" --plan
+```
+
+#### AST Pattern Syntax
+
+| Pattern | Description |
+|---------|-------------|
+| `$VAR` | Match single node, capture as VAR |
+| `$$VAR` | Match zero or more nodes |
+| `$$$VAR` | Match any number of arguments/items |
+| `_` | Wildcard (match but don't capture) |
+
+#### Built-in Rules
+
+| Rule Name | Description |
+|-----------|-------------|
+| `swift-no-print` | Find print() statements |
+| `swift-try-catch` | Find try-catch blocks |
+| `swift-dispatchqueue-main-async` | Find main queue dispatch |
+
+#### AST Options
+
+```bash
+grepl find [query] [OPTIONS]
+  --ast PATTERN          AST pattern to match (repeatable)
+  --ast-rule NAME        Use a named rule file (repeatable)
+  --ast-lang LANG        Language for AST (e.g. swift, python, typescript)
+  --exhaustive           Scan entire repo with AST (slow but complete)
+  --ast-top-files N      Max files to scan when narrowing (default: 100)
+  --ast-max-matches N    Max AST matches to return (default: 500)
+  --ast-optional         Skip AST if sg not installed (warn instead of error)
+  --strategy PRESET      explore | codemod | grep
+  --plan                 Show execution plan without running
+```
+
 ## For LLMs: grep/sed → grepl Cheatsheet
 
 If you're an LLM (Claude Code, etc.), use grepl instead of grep/sed/cat. Here's the mapping:
@@ -120,6 +179,16 @@ If you're an LLM (Claude Code, etc.), use grepl instead of grep/sed/cat. Here's 
 ### Key Flags
 
 ```bash
+grepl find [OPTIONS] [QUERY]         # Hybrid + AST search (RECOMMENDED)
+  -k, --top-k INT      Number of results (default: 10)
+  -p, --path TEXT      Search path (default: .)
+  --ast PATTERN        AST pattern (repeatable)
+  --ast-rule NAME      Named rule file (repeatable)
+  --ast-lang LANG      Language for AST (swift, python, typescript, etc.)
+  --exhaustive         Scan entire repo with AST
+  --strategy PRESET    explore | codemod | grep
+  --plan               Show execution plan only
+
 grepl exact [OPTIONS] PATTERN
   -p, --path TEXT      Path to search (file or directory, default: .)
   -n, --limit INTEGER  Max number of results

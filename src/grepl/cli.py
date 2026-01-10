@@ -64,7 +64,7 @@ class GreplGroup(click.Group):
     def format_custom_help(self):
         """Print beautifully formatted help."""
         # Header
-        print(f"\n{badge('GREPL', Colors.BRIGHT_CYAN)} {dim('v' + __version__)} {dim('─')} {dim('Semantic code search')}\n")
+        print(f"\n{badge('GREPL', Colors.BRIGHT_CYAN)} {dim('v' + __version__)} {dim('─')} {dim('Explainable code search for humans and AI')}\n")
 
         # Commands section
         print(f"  {Colors.BOLD}Commands{Colors.RESET}\n")
@@ -95,6 +95,15 @@ class GreplGroup(click.Group):
         print(f"  {dim('$')} {cyan(f'grepl find {q}authentication{q}')}   {dim('# Hybrid search')}")
         print(f"  {dim('$')} {cyan(f'grepl exact {q}TODO{q} -i')}         {dim('# Case-insensitive grep')}")
         print(f"  {dim('$')} {cyan('grepl read file.py:100')}         {dim('# Read around line 100')}")
+
+        # AST examples section
+        print(f"\n  {Colors.BOLD}AST Search{Colors.RESET} {dim('(requires: brew install ast-grep)')}\n")
+        ast_ex1 = 'grepl find --ast "print($$$)" --ast-lang swift'
+        ast_ex2 = 'grepl find --ast-rule swift-no-print --exhaustive'
+        ast_ex3 = 'grepl find "error" --ast "catch { $$ }" --plan'
+        print(f"  {dim('$')} {cyan(ast_ex1)}")
+        print(f"  {dim('$')} {cyan(ast_ex2)}")
+        print(f"  {dim('$')} {cyan(ast_ex3)}")
 
         # Footer
         print(f"\n  {dim('Run')} {cyan('grepl <command> --help')} {dim('for detailed options')}\n")
