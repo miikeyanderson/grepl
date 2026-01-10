@@ -691,11 +691,14 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str, json_output: b
 
     try:
         # Try ripgrep first
-        cmd = ["rg", "-n", "--color=never", pattern, str(search_path)]
+        # -H: always include filename (even for single files)
+        # -n: show line numbers
+        # --no-heading: output file:line:content format (no grouped headers)
+        cmd = ["rg", "-H", "-n", "--color=never", "--no-heading", pattern, str(search_path)]
         if ignore_case:
-            cmd.insert(2, "-i")
+            cmd.insert(4, "-i")
         if limit:
-            cmd.insert(2, f"--max-count={limit}")
+            cmd.insert(4, f"--max-count={limit}")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -710,15 +713,28 @@ def exact(pattern: str, limit: int, ignore_case: bool, path: str, json_output: b
             # Parse results
             matches_by_file: Dict[str, List[dict]] = {}
             for line in output.strip().split("\n"):
-                if ":" not in line:
+                if not line:
                     continue
-                file_path, line_num, *content_parts = line.split(":", 2)
-                content = content_parts[0] if content_parts else ""
+
+                # Ripgrep format: file_path:line_number:content
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    if not json_output:
+                        console.print(f"[yellow]⚠[/yellow] Skipping malformed ripgrep output (expected file:line:content): {line[:80]}...")
+                    continue
+
+                file_path, line_num_str, content = parts
+
+                # Validate line number is actually a number
+                if not line_num_str.isdigit():
+                    if not json_output:
+                        console.print(f"[yellow]⚠[/yellow] Invalid line number '{line_num_str[:20]}' in {file_path}")
+                    continue
 
                 if file_path not in matches_by_file:
                     matches_by_file[file_path] = []
                 matches_by_file[file_path].append({
-                    "line": int(line_num),
+                    "line": int(line_num_str),
                     "content": content,
                 })
 
