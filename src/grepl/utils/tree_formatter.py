@@ -389,7 +389,11 @@ def format_status_output(
     indexed: bool,
     chunks: int = 0,
     files: int = 0,
-    last_updated: Optional[str] = None
+    last_updated: Optional[str] = None,
+    ollama_running: bool = False,
+    model_available: bool = False,
+    semantic_ready: bool = False,
+    semantic_reason: Optional[str] = None,
 ) -> None:
     """
     Print index status in tree format.
@@ -399,23 +403,51 @@ def format_status_output(
         indexed: Whether the project is indexed
         chunks: Number of indexed chunks
         files: Number of indexed files
-        last_updated: Human-readable time since last update
+        last_updated: ISO timestamp of last update
+        ollama_running: Whether Ollama is running
+        model_available: Whether embedding model is available
+        semantic_ready: Whether semantic search will work
+        semantic_reason: Reason semantic isn't ready (if applicable)
     """
     print(format_status_header(project_path))
     print()
 
     status_nodes = []
 
+    # Index status
     if indexed:
         status_nodes.append(TreeNode(f"Indexed: {green('Yes')}"))
         status_nodes.append(TreeNode(f"Chunks: {cyan(str(chunks))}"))
         if files > 0:
             status_nodes.append(TreeNode(f"Files: {cyan(str(files))}"))
         if last_updated:
-            status_nodes.append(TreeNode(f"Updated: {dim(last_updated)}"))
+            # Format ISO timestamp to human-readable
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(last_updated)
+                human_time = dt.strftime("%Y-%m-%d %H:%M")
+                status_nodes.append(TreeNode(f"Updated: {dim(human_time)}"))
+            except (ValueError, TypeError):
+                status_nodes.append(TreeNode(f"Updated: {dim(last_updated)}"))
     else:
         status_nodes.append(TreeNode(f"Indexed: {yellow('No')}"))
+
+    # Semantic readiness
+    if semantic_ready:
+        status_nodes.append(TreeNode(f"Semantic: {green('Ready')}"))
+    else:
+        reason_text = {
+            "ollama_not_running": f"Ollama not running {dim('(ollama serve)')}",
+            "model_not_available": f"Model missing {dim('(ollama pull nomic-embed-text)')}",
+            "not_indexed": f"Not indexed {dim('(grepl index .)')}",
+        }.get(semantic_reason, semantic_reason or "Not ready")
+        status_nodes.append(TreeNode(f"Semantic: {yellow(reason_text)}"))
+
+    # Quick action hint
+    if not indexed:
         status_nodes.append(TreeNode(f"Run: {cyan('grepl index .')} to index"))
+    elif not semantic_ready and semantic_reason == "ollama_not_running":
+        status_nodes.append(TreeNode(f"Run: {cyan('ollama serve')} to enable semantic"))
 
     print_tree(status_nodes)
 

@@ -324,3 +324,36 @@ def chunk_codebase(root_path: Path) -> Generator[CodeChunk, None, None]:
     for file_path in walk_codebase(root_path):
         for chunk in chunk_file(file_path):
             yield chunk
+
+
+def collect_file_metadata(root_path: Path) -> dict:
+    """Collect metadata (mtime, size, hash) for all indexable files.
+
+    Returns:
+        Dict mapping absolute file path to {mtime, size, content_hash}
+    """
+    import hashlib
+
+    files_metadata = {}
+    for file_path in walk_codebase(root_path):
+        try:
+            stat = file_path.stat()
+            # Compute lightweight hash (first 8KB + file size)
+            # This is faster than full file hash for large files
+            content_hash = ""
+            try:
+                with open(file_path, "rb") as f:
+                    sample = f.read(8192)
+                    content_hash = hashlib.md5(sample + str(stat.st_size).encode()).hexdigest()
+            except Exception:
+                content_hash = ""
+
+            files_metadata[str(file_path.resolve())] = {
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "content_hash": content_hash,
+            }
+        except Exception:
+            continue
+
+    return files_metadata

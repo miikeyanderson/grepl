@@ -14,8 +14,19 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
 from .embedder import check_ollama, check_model
-from .chunker import chunk_codebase
-from .store import index_chunks, search, clear_index, get_stats, has_index
+from .chunker import chunk_codebase, chunk_file, collect_file_metadata
+from .store import (
+    index_chunks,
+    search,
+    clear_index,
+    get_stats,
+    get_detailed_stats,
+    has_index,
+    check_semantic_ready,
+    store_index_metadata,
+    get_changed_files,
+    get_collection,
+)
 from .planner import analyze_query, Strategy, ExecutionPlan
 from .ranker import Hit, RankWeights, merge_results, rerank
 from .ast_grep import (
@@ -118,9 +129,13 @@ def main():
 
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
-@click.option("--force", "-f", is_flag=True, help="Force reindex")
+@click.option("--force", "-f", is_flag=True, help="Force full reindex")
 def index(path: str, force: bool):
-    """Index a codebase for semantic search."""
+    """Index a codebase for semantic search.
+
+    Uses incremental indexing by default - only indexes new/modified files.
+    Use --force for a full reindex.
+    """
     project_path = Path(path).resolve()
 
     # Print header
@@ -136,54 +151,128 @@ def index(path: str, force: bool):
         format_error("Model 'nomic-embed-text' not found", hint=f"Pull with: {cyan('ollama pull nomic-embed-text')}")
         sys.exit(1)
 
-    # Check if already indexed
-    if has_index(project_path) and not force:
-        stats = get_stats(project_path)
-        print(f"  {yellow('!')} Index already exists with {cyan(str(stats['chunks']))} chunks")
-        print(f"  {dim('Use')} {cyan('--force')} {dim('to reindex')}")
+    # Collect metadata for all current files
+    format_index_progress("Scanning files...")
+    current_files_metadata = collect_file_metadata(project_path)
+
+    if not current_files_metadata:
+        print(f"  {yellow('!')} No files found to index")
         return
 
+    # Determine what needs to be indexed
     if force:
-        # Delete and recreate the collection to ensure index settings (e.g. HNSW space) apply.
-        format_index_progress("Clearing existing index...")
+        # Full reindex
+        format_index_progress("Full reindex requested")
         clear_index(project_path)
-        format_index_progress("Cleared", done=True)
+        files_to_index = list(current_files_metadata.keys())
+        new_count, modified_count, deleted_count = len(files_to_index), 0, 0
+    elif has_index(project_path):
+        # Incremental update
+        new_files, modified_files, deleted_files = get_changed_files(
+            project_path, current_files_metadata
+        )
+        files_to_index = new_files + modified_files
+        new_count, modified_count, deleted_count = len(new_files), len(modified_files), len(deleted_files)
 
-    # Collect chunks
-    format_index_progress("Scanning files...")
+        if not files_to_index and not deleted_files:
+            stats = get_stats(project_path)
+            print(f"  {green('✓')} Index is up to date ({cyan(str(stats['chunks']))} chunks)")
+            return
 
+        # Show what will be updated
+        if new_count > 0:
+            format_index_progress(f"New files: {new_count}")
+        if modified_count > 0:
+            format_index_progress(f"Modified files: {modified_count}")
+        if deleted_count > 0:
+            format_index_progress(f"Deleted files: {deleted_count}")
+
+        # Delete chunks for removed files
+        if deleted_files:
+            collection = get_collection(project_path)
+            for deleted_file in deleted_files:
+                try:
+                    # Get all chunks for this file
+                    results = collection.get(where={"file_path": deleted_file})
+                    if results and results.get("ids"):
+                        collection.delete(ids=results["ids"])
+                except Exception:
+                    pass
+            format_index_progress(f"Removed {deleted_count} deleted files", done=True)
+
+        # Delete chunks for modified files (they will be re-indexed)
+        if modified_files:
+            collection = get_collection(project_path)
+            for modified_file in modified_files:
+                try:
+                    results = collection.get(where={"file_path": modified_file})
+                    if results and results.get("ids"):
+                        collection.delete(ids=results["ids"])
+                except Exception:
+                    pass
+    else:
+        # First time indexing
+        files_to_index = list(current_files_metadata.keys())
+        new_count, modified_count, deleted_count = len(files_to_index), 0, 0
+
+    # Chunk files that need indexing
+    format_index_progress(f"Chunking {len(files_to_index)} files...")
+    chunks = []
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Scanning...", total=None)
-        chunks = list(chunk_codebase(project_path))
+        task = progress.add_task("Chunking...", total=None)
+        for file_path_str in files_to_index:
+            file_chunks = chunk_file(Path(file_path_str))
+            chunks.extend(file_chunks)
         progress.update(task, description=f"Found {len(chunks)} chunks")
 
     format_index_progress(f"Found {len(chunks)} chunks", done=True)
 
-    if not chunks:
-        print(f"  {yellow('!')} No files found to index")
+    if not chunks and deleted_count == 0:
+        print(f"  {yellow('!')} No chunks to index")
         return
 
     # Index chunks
-    format_index_progress("Generating embeddings...")
+    if chunks:
+        format_index_progress("Generating embeddings...")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Indexing...", total=None)
+            # Use incremental indexing - add new chunks without clearing
+            from .store import _index_batch
+            collection = get_collection(project_path)
+            batch_size = 50
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i+batch_size]
+                _index_batch(collection, batch)
+            progress.update(task, description="Done")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Indexing...", total=None)
-        index_chunks(project_path, chunks)
-        progress.update(task, description="Done")
+        format_index_progress(f"Indexed {len(chunks)} chunks", done=True)
 
-    format_index_progress(f"Indexed {len(chunks)} chunks", done=True)
+    # Store metadata for next incremental update
+    store_index_metadata(project_path, current_files_metadata)
+
+    # Show summary
     print()
-    print(f"  {green('Ready!')} Run {cyan('grepl search <query>')} to search")
+    if force or not has_index(project_path):
+        print(f"  {green('Ready!')} Run {cyan('grepl search <query>')} to search")
+    else:
+        summary_parts = []
+        if new_count > 0:
+            summary_parts.append(f"{new_count} new")
+        if modified_count > 0:
+            summary_parts.append(f"{modified_count} modified")
+        if deleted_count > 0:
+            summary_parts.append(f"{deleted_count} deleted")
+        print(f"  {green('Updated!')} {', '.join(summary_parts)}")
 
 
 @main.command("search")
@@ -527,6 +616,10 @@ def find_cmd(
     semantic_hits: List[Hit] = []
     ast_hits: List[Hit] = []
 
+    # Track semantic search availability for degradation messaging
+    semantic_skipped = False
+    semantic_skip_reason = None
+
     # Grep
     if plan.run_grep and plan.grep_pattern:
         max_grep = max(50, min(500, top_k * 25))
@@ -536,6 +629,8 @@ def find_cmd(
     # Semantic
     if plan.run_semantic and plan.semantic_query:
         if not check_ollama():
+            semantic_skipped = True
+            semantic_skip_reason = "ollama_not_running"
             if semantic_only and not grep_hits:
                 if json_output:
                     print(json.dumps({"error": "Ollama is not running"}))
@@ -543,6 +638,8 @@ def find_cmd(
                     format_error("Ollama is not running", hint=f"Start with: {cyan('ollama serve')}")
                 sys.exit(1)
         elif not has_index(project_path):
+            semantic_skipped = True
+            semantic_skip_reason = "not_indexed"
             if semantic_only and not grep_hits:
                 if json_output:
                     print(json.dumps({"error": "Codebase not indexed"}))
@@ -634,6 +731,8 @@ def find_cmd(
             "mode": effective_mode,
             "plan": plan.describe(),
             "time_ms": elapsed_ms,
+            "semantic_available": not semantic_skipped,
+            "semantic_skip_reason": semantic_skip_reason,
             "results": [
                 {
                     "source": h.source,
@@ -726,6 +825,16 @@ def find_cmd(
         mode=effective_mode,
         max_lines=3,
     )
+
+    # Show degradation message if semantic was skipped but we found results
+    if semantic_skipped and ranked:
+        from .utils.tree_formatter import yellow, cyan, dim
+        reason_msg = {
+            "ollama_not_running": f"Ollama not running. Start with {cyan('ollama serve')} for semantic search.",
+            "not_indexed": f"Codebase not indexed. Run {cyan(f'grepl index {path}')} for semantic search.",
+        }.get(semantic_skip_reason, f"Semantic search unavailable ({semantic_skip_reason})")
+
+        console.print(f"\n  {yellow('ℹ')} Note: {dim(reason_msg)}")
 
 
 @main.command()
@@ -1230,15 +1339,30 @@ def context(location: str, json_output: bool):
 
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
-def status(path: str):
-    """Check indexing status."""
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format for agents")
+def status(path: str, json_output: bool):
+    """Check indexing status.
+
+    Returns comprehensive index state for both humans and agents.
+    Use --json for machine-readable output suitable for automation.
+    """
     project_path = Path(path).resolve()
-    stats = get_stats(project_path)
+    stats = get_detailed_stats(project_path)
+
+    if json_output:
+        print(json.dumps(stats, indent=2))
+        return
 
     format_status_output(
         project_path=str(project_path),
-        indexed=stats["exists"],
+        indexed=stats["indexed"],
         chunks=stats.get("chunks", 0),
+        files=stats.get("files", 0),
+        last_updated=stats.get("lastIndexedAt"),
+        ollama_running=stats.get("ollamaRunning", False),
+        model_available=stats.get("modelAvailable", False),
+        semantic_ready=stats.get("semanticReady", False),
+        semantic_reason=stats.get("semanticReadyReason"),
     )
 
 

@@ -113,9 +113,11 @@ git push
 brew update
 
 # Upgrade to new version
-brew upgrade grepl
+brew upgrade grepl  # preferred for normal updates
 
-# Or force reinstall
+# Reinstall only if the install/linking is broken (can re-download/re-pour large deps)
+brew reinstall grepl
+# or:
 brew uninstall grepl && brew install grepl
 ```
 
@@ -172,7 +174,7 @@ brew upgrade grepl
 which grepl
 brew list grepl
 
-# Reinstall if needed
+# Reinstall only if needed (can re-download/re-pour large deps)
 brew uninstall grepl && brew install grepl
 ```
 
