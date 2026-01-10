@@ -38,7 +38,7 @@ fi
 # Extract version number (without 'v' prefix)
 VERSION_NUM=${VERSION#v}
 
-echo -e "${GREEN}Step 1`: Commit changes${NC}"
+echo -e "${GREEN}Step 1: Commit changes${NC}"
 echo "----------------------------"
 cd "$GREPL_DIR"
 
@@ -52,20 +52,20 @@ else
 fi
 echo ""
 
-echo -e "${GREEN}Step 2`: Push to GitHub${NC}"
+echo -e "${GREEN}Step 2: Push to GitHub${NC}"
 echo "----------------------------"
 git push origin main
 echo -e "${GREEN}Pushed to main!${NC}"
 echo ""
 
-echo -e "${GREEN}Step 3`: Tag version${NC}"
+echo -e "${GREEN}Step 3: Tag version${NC}"
 echo "----------------------------"
 git tag "$VERSION"
 git push origin "$VERSION"
 echo -e "${GREEN}Tagged and pushed $VERSION!${NC}"
 echo ""
 
-echo -e "${GREEN}Step 4`: Get SHA256 hash${NC}"
+echo -e "${GREEN}Step 4: Get SHA256 hash${NC}"
 echo "----------------------------"
 TARBALL_URL="https://github.com/miikeyanderson/grepl/archive/refs/tags/${VERSION}.tar.gz"
 echo "Downloading ${TARBALL_URL}..."
@@ -81,7 +81,7 @@ fi
 echo -e "${GREEN}SHA256: $SHA256${NC}"
 echo ""
 
-echo -e "${GREEN}Step 5`: Update Homebrew formula${NC}"
+echo -e "${GREEN}Step 5: Update Homebrew formula${NC}"
 echo "----------------------------"
 
 # Backup old formula
@@ -121,16 +121,22 @@ EOF
 echo -e "${GREEN}Homebrew formula updated!${NC}"
 echo ""
 
-echo -e "${GREEN}Step 6`: Push Homebrew tap${NC}"
+echo -e "${GREEN}Step 6: Push Homebrew tap${NC}"
 echo "----------------------------"
 cd "$HOMEBREW_TAP_DIR"
-git add Formula/grepl.rb
-git commit -m "Update grepl to $VERSION_NUM"
-git push
-echo -e "${GREEN}Homebrew tap updated!${NC}"
+rm -f "${FORMULA_PATH}.backup" || true
+
+if [ -z "$(git status --porcelain)" ]; then
+    echo -e "${YELLOW}No Homebrew formula changes to commit. Skipping tap update.${NC}"
+else
+    git add Formula/grepl.rb
+    git commit -m "Update grepl to $VERSION_NUM"
+    git push
+    echo -e "${GREEN}Homebrew tap updated!${NC}"
+fi
 echo ""
 
-echo -e "${GREEN}Step 7`: Upgrade Homebrew package${NC}"
+echo -e "${GREEN}Step 7: Upgrade Homebrew package${NC}"
 echo "----------------------------"
 cd ~
 brew update
