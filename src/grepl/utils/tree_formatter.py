@@ -40,16 +40,17 @@ class Colors:
 
 
 def supports_color() -> bool:
-    """Check if the terminal supports color output."""
+    """Check if the terminal supports color output.
+
+    Default: colors ON (most terminals support ANSI colors)
+    Opt-out: set NO_COLOR=1 to disable (follows no-color.org standard)
+    """
     import os
-    # Force color if GREPL_COLOR or CLICOLOR_FORCE is set
-    if os.environ.get("GREPL_COLOR") or os.environ.get("CLICOLOR_FORCE"):
-        return True
-    # Disable if NO_COLOR is set
+    # Respect NO_COLOR standard (https://no-color.org/)
     if os.environ.get("NO_COLOR"):
         return False
-    # Default: check if TTY
-    return sys.stdout.isatty()
+    # Default to color - most modern terminals support it
+    return True
 
 
 def colorize(text: str, color: str, force: bool = False) -> str:
