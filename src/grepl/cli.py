@@ -45,6 +45,7 @@ from .utils.tree_formatter import (
     format_read_output,
     format_context_output,
     format_status_output,
+    format_ls_output,
     format_index_header,
     format_index_progress,
     format_error,
@@ -86,6 +87,7 @@ class GreplGroup(click.Group):
             ("search", "Semantic search", "grepl search \"auth logic\"", False),
             ("read", "Read file with context", "grepl read src/cli.py:50", False),
             ("context", "Show function at line", "grepl context src/cli.py:100", False),
+            ("ls", "List directory with tree structure", "grepl ls src/", False),
             ("index", "Index codebase", "grepl index", False),
             ("status", "Check index status", "grepl status", False),
             ("clear", "Clear search index", "grepl clear", False),
@@ -424,7 +426,7 @@ def _run_rg(pattern: str, search_path: Path, *, fixed: bool, max_results: int, e
 
 @main.command("find")
 @click.argument("query", default="")
-@click.option("-k", "--top-k", default=10, show_default=True, help="Number of results")
+@click.option("-k", "-n", "--top-k", default=10, show_default=True, help="Number of results")
 @click.option("-p", "--path", default=".", help="Search path")
 @click.option("--lang", default=None, help="Limit to languages (e.g. py,ts,swift)")
 @click.option("--grep-only", is_flag=True, help="Only use grep")
@@ -1335,6 +1337,67 @@ def context(location: str, json_output: bool):
         block_type,
         block_name
     )
+
+
+@main.command()
+@click.argument("path", default=".", type=click.Path(exists=True))
+@click.option("-a", "--all", "show_hidden", is_flag=True, help="Show hidden files")
+@click.option("-t", "--dirs-first", "dirs_first", is_flag=True, help="Sort directories first")
+@click.option("-f", "--flat", "flat", is_flag=True, help="Show only top level (non-recursive)")
+@click.option("-d", "--depth", "depth", default=10, help="Max tree depth")
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format for agents")
+def ls(path: str, show_hidden: bool, dirs_first: bool, flat: bool, depth: int, json_output: bool):
+    """List directory contents with tree structure and rich formatting.
+
+    Shows files and directories with relative paths, avoiding system noise.
+    Directories are shown with a trailing slash (/) and highlighted in cyan.
+
+    By default shows recursive directory tree (directories only).
+    Use -f/--flat for single-level listing with files.
+    """
+    target_path = Path(path).resolve()
+
+    if not target_path.is_dir():
+        format_error_rich(
+            f"Not a directory: {path}",
+            context=f"Path exists but is not a directory: {target_path}",
+            fixes=[f"file {path}", f"grepl read {path}"],
+        )
+        sys.exit(ExitCode.PATH_ERROR)
+
+    def collect_items(dir_path: Path, current_depth: int) -> List[dict]:
+        items = []
+        try:
+            for entry in dir_path.iterdir():
+                is_dir = entry.is_dir()
+                if not flat and not is_dir:
+                    continue
+                item = {
+                    "name": entry.name,
+                    "is_dir": is_dir,
+                }
+                if is_dir and not flat and current_depth < depth:
+                    item["children"] = collect_items(entry, current_depth + 1)
+                items.append(item)
+        except PermissionError:
+            pass
+        return items
+
+    items = collect_items(target_path, 0)
+
+    if json_output:
+        json_data = {
+            "path": str(target_path),
+            "items": items,
+        }
+        format_json_output(json_data, raw=True)
+        return
+
+    try:
+        rel_path = target_path.relative_to(Path.cwd())
+    except ValueError:
+        rel_path = target_path
+    format_ls_output(str(rel_path), items, show_hidden, dirs_first, not flat)
 
 
 @main.command()

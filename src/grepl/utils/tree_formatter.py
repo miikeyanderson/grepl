@@ -677,3 +677,77 @@ def format_context_output(
         marker = yellow("←") if is_target else " "
 
         print(f"  {line_num} {separator} {content} {marker}")
+
+
+def format_ls_header(path: str, item_count: int) -> str:
+    """Format header for ls output."""
+    label = badge("LS", Colors.BRIGHT_CYAN)
+    path_str = cyan(path)
+    stats = dim(f"{item_count} items")
+    return f"{label} {path_str} {dim(TREE_LINE)} {stats}"
+
+
+def format_ls_output(
+    path: str,
+    items: List[dict],
+    show_hidden: bool = False,
+    dirs_first: bool = False,
+    recursive: bool = False,
+) -> None:
+    """
+    Print directory listing in tree format.
+
+    Args:
+        path: The directory path being listed
+        items: List of {name, is_dir, children} dicts
+        show_hidden: Whether to show hidden files
+        dirs_first: Whether to sort directories first
+        recursive: Whether to show recursive tree
+    """
+    def build_tree(items_list: List[dict]) -> List[TreeNode]:
+        nodes = []
+        for item in items_list:
+            name = item["name"]
+            is_dir = item["is_dir"]
+            if is_dir:
+                label = f"{cyan(name)}/"
+            else:
+                label = name
+
+            children = item.get("children")
+            if children and recursive:
+                child_nodes = build_tree(children)
+                nodes.append(TreeNode(label, child_nodes))
+            else:
+                nodes.append(TreeNode(label))
+        return nodes
+
+    # Filter items (only top level for hidden check)
+    filtered_items = items
+    if not show_hidden:
+        filtered_items = [i for i in items if not i["name"].startswith(".")]
+
+    # Count total items for header
+    total_count = sum(1 + _count_recursive(i.get("children", [])) for i in filtered_items)
+
+    # Sort if needed (only top level)
+    if dirs_first:
+        filtered_items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+    else:
+        filtered_items.sort(key=lambda x: x["name"].lower())
+
+    print(format_ls_header(path, total_count if recursive else len(filtered_items)))
+    print()
+
+    nodes = build_tree(filtered_items)
+    print_tree(nodes)
+
+
+def _count_recursive(items: List[dict]) -> int:
+    count = 0
+    for item in items:
+        count += 1
+        children = item.get("children")
+        if children:
+            count += _count_recursive(children)
+    return count
