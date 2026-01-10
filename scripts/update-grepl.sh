@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Grepl Update Script - Automates theversion release and Homebrew update
+# Grepl Update Script - Automates the version release and Homebrew update
 
 # Colors for output
 RED='\033[0;31m'
@@ -22,7 +22,7 @@ VERSION=$1
 COMMIT_MESSAGE=$2
 GREPL_DIR="/Users/mikeyanderson/grepl"
 HOMEBREW_TAP_DIR="/opt/homebrew/Library/Taps/miikeyanderson/homebrew-grepl"
-FORMULA_PATH="$HOMEBREW_TAP_DIR/Formula/grepl.py"
+FORMULA_PATH="$HOMEBREW_TAP_DIR/Formula/grepl.rb"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}Grepl Update Script${NC}"
@@ -31,7 +31,7 @@ echo ""
 
 # Validate version format
 if [[ ! $VERSION =~ ^v0\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}Error: Version must be in format v0.X.b${NC}"
+    echo -e "${RED}Error: Version must be in format v0.X.Y${NC}"
     exit 1
 fi
 
@@ -70,7 +70,8 @@ echo "----------------------------"
 TARBALL_URL="https://github.com/miikeyanderson/grepl/archive/refs/tags/${VERSION}.tar.gz"
 echo "Downloading ${TARBALL_URL}..."
 
-SHA256=$(curl -sL "$TARBALL_URL" | sums -a 256 | awk '{print $1}')
+# Use shasum (available on macOS by default)
+SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
 
 if [ -z "$SHA256" ]; then
     echo -e "${RED}Error: Failed to get SHA256 hash${NC}"
@@ -87,11 +88,11 @@ echo "----------------------------"
 cp "$FORMULA_PATH" "${FORMULA_PATH}.backup"
 
 # Update the formula
- python3 << EOF
+python3 << EOF
 import re
 
 formula_path = "$FORMULA_PATH"
-version = "$VERSION_NUM"
+tag = "$VERSION"
 sha256 = "$SHA256"
 
 with open(formula_path, 'r') as f:
@@ -100,7 +101,7 @@ with open(formula_path, 'r') as f:
 # Update URL
 content = re.sub(
     r'url "https://github.com/miikeyanderson/grepl/archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar.gz"',
-    f'url "https://github.com/miikeyanderson/grepl/archive/refs/tags/{version}.tar.gz"',
+    f'url "https://github.com/miikeyanderson/grepl/archive/refs/tags/{tag}.tar.gz"',
     content
 )
 
@@ -114,7 +115,7 @@ content = re.sub(
 with open(formula_path, 'w') as f:
     f.write(content)
 
-print(f"Updated formula to {version}")
+print(f"Updated formula to {tag}")
 EOF
 
 echo -e "${GREEN}Homebrew formula updated!${NC}"
@@ -123,7 +124,7 @@ echo ""
 echo -e "${GREEN}Step 6`: Push Homebrew tap${NC}"
 echo "----------------------------"
 cd "$HOMEBREW_TAP_DIR"
-git add Formula/grepl.py
+git add Formula/grepl.rb
 git commit -m "Update grepl to $VERSION_NUM"
 git push
 echo -e "${GREEN}Homebrew tap updated!${NC}"

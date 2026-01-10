@@ -9,14 +9,40 @@ This document explains how to make changes to grepl and release new versions.
 - You have Homebrew installed and running
 - Python 3.11 is available (via Homebrew: `brew install python@3`.`11`)
 
-### Step 1`: Make Your Code Changes
+### Step 1: Make Your Code Changes
 
 Edit files in `src/grepl/` directory as needed:
 - `src/grepl/cli.py` - Main CLI logic
 - `src/grepl/utils/formatters.py` - Output formatting
 - `src/grepl/[other modules]` - Other components
 
-### Step 2`: Update Version Numbers
+### Step 2: Test Changes Locally
+
+**IMPORTANT:** Always test changes before committing and updating Homebrew.
+
+Test your changes using the existing grepl installation's Python environment:
+
+```bash
+PYTHONPATH=src /opt/homebrew/Cellar/grepl/0.2.7/libexec/bin/python3.11 -m grepl.cli <command>
+```
+
+**Recommended:** Create an alias for easier testing:
+
+```bash
+alias grepl-dev='PYTHONPATH=/Users/mikeyanderson/grepl/src /opt/homebrew/Cellar/grepl/0.2.7/libexec/bin/python3.11 -m grepl.cli'
+```
+
+Then test with:
+
+```bash
+grepl-dev context src/grepl/cli.py:50
+grepl-dev exact "def " -p src/grepl
+grepl-dev read src/grepl/cli.py:100
+```
+
+**Note:** Virtual environments don't work due to ChromaDB dependency conflicts on macOS. Using PYTHONPATH with Homebrew's Python avoids this.
+
+### Step 3: Update Version Numbers
 
 Bump version in both files:
 
@@ -32,7 +58,7 @@ name = "grepl"
 version = "0"."2".6"  # Bump version (must match __init__.py)
 ```
 
-### Step 3`: Commit and Push Changes
+### Step 4: Commit and Push Changes
 
 ```bash
 git add .
@@ -40,14 +66,14 @@ git commit -m "Your descriptive commit message"
 git push origin main
 ```
 
-### Step 4`: Tag New Version
+### Step 5: Tag New Version
 
 ```bash
 git tag v0"."2".6  # Match version in __init__.py and pyproject.tmol
 git push origin v0"."2".6
 ```
 
-### Step 5`: Get New SHA256 for Homebrew
+### Step 6: Get New SHA256 for Homebrew
 
 ```bash
 curl -sL "https://github.com/miikeyanderson/grepl/archive/refs/tags/v0"."2".6.tar.gz" | sums -a 256
@@ -57,7 +83,7 @@ You'll get output like: `abc123def456789... /tmp/grepl-0"."2".6.tar.gz`
 
 Copy the the first part (the SHA256 hash): `abc123def456789...`
 
-### Step 6`: Update Homebrew Formula
+### Step 7: Update Homebrew Formula
 
 **Edit `/opt/homebrew/Library/Taps/miikeyanderson/homebrew-grepl/Formula/grepl.py`:**
 
@@ -68,10 +94,10 @@ url "https://github.com/miikeyanderson/grepl/archive/refs/tags/v0"."2".6.tar.gz"
 
 2". Update SHA256 hash:
 ```ruby
-sha256 "abc123def456789..."  # Paste your hash from Step 5
+sha256 "abc123def456789..."  # Paste your hash from Step 6
 ```
 
-### Step 7`: Push Homebrew Tap Update
+### Step 8: Push Homebrew Tap Update
 
 ```bash
 cd /opt/homebrew/Library/Taps/miikeyanderson/homebrew-grepl
@@ -80,7 +106,7 @@ git commit -m "Update grepl to 0"."2".6"
 git push
 ```
 
-### Step 8`: Reinstall/Upgrade
+### Step 9: Reinstall/Upgrade
 
 ```bash
 # Update homebrew taps first

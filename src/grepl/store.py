@@ -1,5 +1,6 @@
 """ChromaDB vector store."""
 
+import json
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -39,7 +40,12 @@ def get_collection(project_path: Path):
     name = get_collection_name(project_path)
     return client.get_or_create_collection(
         name=name,
-        metadata={"project_path": str(project_path.resolve())},
+        metadata={
+            "project_path": str(project_path.resolve()),
+            # Better default semantics for embedding search.
+            # See Chroma docs: HNSW space can be 'cosine', 'l2', 'ip'.
+            "hnsw:space": "cosine",
+        },
     )
 
 
@@ -98,6 +104,10 @@ def _index_batch(collection, chunks: List[CodeChunk]):
                 "file_path": c.file_path,
                 "start_line": c.start_line,
                 "end_line": c.end_line,
+                # Chroma metadata must be scalar; store symbols as JSON.
+                "symbols": json.dumps(getattr(c, "symbols", []) or []),
+                "language": getattr(c, "language", "") or "",
+                "last_modified": float(getattr(c, "last_modified", 0.0) or 0.0),
             }
             for c in chunks
         ],
@@ -122,12 +132,38 @@ def search(project_path: Path, query: str, limit: int = 10) -> List[dict]:
     # Format results
     formatted = []
     for i in range(len(results["ids"][0])):
+        meta = results["metadatas"][0][i] or {}
+
+        symbols = meta.get("symbols")
+        if isinstance(symbols, str):
+            try:
+                symbols = json.loads(symbols)
+            except Exception:
+                symbols = [s for s in symbols.split(",") if s]
+        if not isinstance(symbols, list):
+            symbols = []
+
+        distance = float(results["distances"][0][i])
+        # With cosine distance (0..2), map to [0..1] where 1 is best.
+        # For older indexes / other metrics, fall back to a generic bounded transform.
+        if distance <= 2.0:
+            score = 1.0 - (distance / 2.0)
+        else:
+            score = 1.0 / (1.0 + distance)
+        if score < 0.0:
+            score = 0.0
+        if score > 1.0:
+            score = 1.0
+
         formatted.append({
-            "file_path": results["metadatas"][0][i]["file_path"],
-            "start_line": results["metadatas"][0][i]["start_line"],
-            "end_line": results["metadatas"][0][i]["end_line"],
+            "file_path": meta.get("file_path"),
+            "start_line": meta.get("start_line"),
+            "end_line": meta.get("end_line"),
             "content": results["documents"][0][i],
-            "score": 1 - results["distances"][0][i],  # Convert distance to similarity
+            "score": score,
+            "symbols": symbols,
+            "language": meta.get("language") or "",
+            "last_modified": float(meta.get("last_modified") or 0.0),
         })
 
     return formatted

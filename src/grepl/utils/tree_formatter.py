@@ -266,6 +266,71 @@ def format_search_results(results: List[dict], query: str, max_lines: int = 3) -
     print_tree(result_nodes)
 
 
+def _source_tag(source: str) -> str:
+    if source == "hybrid":
+        return badge("hybrid", Colors.BRIGHT_MAGENTA)
+    if source == "semantic":
+        return badge("semantic", Colors.BRIGHT_GREEN)
+    return badge("grep", Colors.BRIGHT_YELLOW)
+
+
+def format_find_header(query: str, result_count: int, mode: str, best_score: Optional[float] = None) -> str:
+    label = badge("FIND", Colors.BRIGHT_CYAN)
+    query_str = cyan(f'"{query}"')
+    stats = f"{result_count} results ({mode})"
+    if best_score is not None:
+        stats += f" (best: {format_score(best_score)})"
+    return f"{label} {query_str} {dim(TREE_LINE)} {dim(stats)}"
+
+
+def format_find_results(results: List[dict], query: str, mode: str, max_lines: int = 3) -> None:
+    """Print hybrid search results in tree format.
+
+    Expected result dict keys:
+      file_path, start_line, end_line, score, preview/content, source
+    """
+    if not results:
+        print(format_find_header(query, 0, mode))
+        print()
+        print(dim("  No results found."))
+        return
+
+    best_score = max(float(r.get("score", 0)) for r in results)
+    print(format_find_header(query, len(results), mode, best_score))
+    print()
+
+    nodes: List[TreeNode] = []
+    for r in results:
+        file_path = r.get("file_path") or r.get("path") or "unknown"
+        start_line = r.get("start_line") or r.get("line") or "?"
+        end_line = r.get("end_line", start_line)
+        score = float(r.get("score", 0))
+        source = r.get("source", "hybrid")
+        content = r.get("preview") or r.get("content") or ""
+
+        if start_line != end_line:
+            loc = f"{file_path}:{start_line}-{end_line}"
+        else:
+            loc = f"{file_path}:{start_line}"
+
+        label = f"{_source_tag(source)} {cyan(loc)} {dim(TREE_LINE)} {format_score(score)}"
+
+        child_nodes: List[TreeNode] = []
+        lines = content.split("\n")[:max_lines]
+        for line in lines:
+            line = line.rstrip()
+            if len(line) > 80:
+                line = line[:77] + "..."
+            if line.strip():
+                child_nodes.append(TreeNode(dim(line)))
+        if len(content.split("\n")) > max_lines:
+            child_nodes.append(TreeNode(dim("...")))
+
+        nodes.append(TreeNode(label, child_nodes))
+
+    print_tree(nodes)
+
+
 def format_read_header(file_path: str, start_line: int, end_line: int, total_lines: int) -> str:
     """Format header for file read output."""
     label = badge("READ", Colors.BRIGHT_BLUE)
@@ -373,3 +438,208 @@ def format_error(message: str, hint: Optional[str] = None) -> None:
     if hint:
         print()
         print(f"  {dim(TREE_LAST)} {dim('Hint:')} {hint}")
+
+
+# Exit codes for Claude Code understanding
+class ExitCode:
+    """Meaningful exit codes that help Claude understand what happened."""
+    SUCCESS = 0           # Results found or operation succeeded
+    PATTERN_ERROR = 1     # Pattern syntax error (fix pattern)
+    NO_MATCHES = 2        # Valid pattern, nothing found
+    PATH_ERROR = 3        # Path doesn't exist (fix path)
+    PERMISSION_ERROR = 4  # Permission denied
+
+
+def format_error_rich(
+    message: str,
+    context: Optional[str] = None,
+    why: Optional[List[str]] = None,
+    fixes: Optional[List[str]] = None,
+    tip: Optional[str] = None,
+) -> None:
+    """
+    Print a rich 3-layer error message optimized for Claude Code.
+
+    Layer 1: Problem statement (what went wrong)
+    Layer 2: Context (what was attempted)
+    Layer 3: Fixes (how to resolve it)
+
+    Args:
+        message: The main error message
+        context: What was being attempted when error occurred
+        why: List of reasons why this might have happened
+        fixes: List of suggested fixes (commands Claude can run)
+        tip: Optional tip for advanced usage
+    """
+    label = badge("ERROR", Colors.BRIGHT_RED)
+    print(f"{label} {red(message)}")
+    print()
+
+    if context:
+        print(f"  {dim('What happened:')}")
+        print(f"    {dim(context)}")
+        print()
+
+    if why:
+        print(f"  {dim('Why this failed:')}")
+        for reason in why:
+            print(f"    {dim('•')} {dim(reason)}")
+        print()
+
+    if fixes:
+        print(f"  {dim('How to fix:')}")
+        for i, fix in enumerate(fixes, 1):
+            print(f"    {yellow(str(i) + '.')} {cyan(fix)}")
+        print()
+
+    if tip:
+        print(f"  {dim('Tip:')} {dim(tip)}")
+
+
+def format_no_results(
+    pattern: str,
+    search_type: str,
+    files_searched: int = 0,
+    time_ms: int = 0,
+    suggestions: Optional[List[str]] = None,
+    did_you_mean: Optional[str] = None,
+) -> None:
+    """
+    Format a 'no results found' message with helpful suggestions.
+
+    Args:
+        pattern: The pattern that was searched
+        search_type: Type of search (EXACT, SEARCH, etc.)
+        files_searched: Number of files that were searched
+        time_ms: Time taken in milliseconds
+        suggestions: List of alternative patterns to try
+        did_you_mean: A single suggested correction
+    """
+    label = badge(search_type, Colors.BRIGHT_YELLOW)
+    print(f"{label} {cyan(repr(pattern))} {dim('──')} {dim('0 matches')}")
+    print()
+
+    # Context about what was searched
+    if files_searched > 0:
+        print(f"  {dim('Searched:')} {dim(f'{files_searched} files')} {dim(f'({time_ms}ms)')}")
+        print()
+
+    # Did you mean suggestion
+    if did_you_mean:
+        print(f"  {dim('Did you mean:')} {cyan(did_you_mean)}")
+        print()
+
+    # Alternative patterns
+    if suggestions:
+        print(f"  {dim('Try instead:')}")
+        for suggestion in suggestions[:3]:  # Max 3 suggestions
+            print(f"    {dim('•')} {cyan(suggestion)}")
+        print()
+
+    # General tips
+    print(f"  {dim('Tips:')}")
+    print(f"    {dim('•')} Check spelling and case sensitivity")
+    print(f"    {dim('•')} Try a simpler or partial pattern")
+    print(f"    {dim('•')} Use {cyan('grepl read <file>')} {dim('to verify file contents')}")
+
+
+def format_success_header(
+    badge_text: str,
+    badge_color: str,
+    pattern: str,
+    match_count: int,
+    file_count: int,
+    time_ms: int = 0,
+) -> str:
+    """
+    Format a success header with performance metrics.
+
+    Args:
+        badge_text: Badge label (EXACT, SEARCH, etc.)
+        badge_color: Color for the badge
+        pattern: The search pattern
+        match_count: Number of matches found
+        file_count: Number of files with matches
+        time_ms: Time taken in milliseconds
+    """
+    label = badge(badge_text, badge_color)
+    stats = f"{match_count} matches in {file_count} files"
+    perf = f"({time_ms}ms)" if time_ms > 0 else ""
+
+    return f"{label} {cyan(repr(pattern))} {dim('──')} {dim(stats)} {dim(perf)}"
+
+
+def format_tip(tip_text: str, command: Optional[str] = None) -> None:
+    """Print a contextual tip."""
+    print()
+    if command:
+        print(f"  {dim('Tip:')} {dim(tip_text)}")
+        print(f"    {cyan(command)}")
+    else:
+        print(f"  {dim('Tip:')} {dim(tip_text)}")
+
+
+def format_performance(files_scanned: int, time_ms: int) -> None:
+    """Print performance metrics."""
+    if time_ms < 50:
+        perf_label = green("Fast")
+    elif time_ms < 200:
+        perf_label = yellow("OK")
+    else:
+        perf_label = red("Slow")
+
+    print()
+    print(f"  {dim('Performance:')} {perf_label} {dim(f'({files_scanned} files in {time_ms}ms)')}")
+
+
+def format_context_header(
+    file_path: str,
+    block_type: str,
+    block_name: str,
+    start_line: int,
+    end_line: int,
+) -> str:
+    """Format header for context output."""
+    label = badge("CONTEXT", Colors.BRIGHT_CYAN)
+    path_str = cyan(file_path)
+    block_info = f"{block_type} {bold(block_name)}" if block_name else block_type
+    range_str = dim(f"lines {start_line}-{end_line}")
+    return f"{label} {path_str} {dim(TREE_LINE)} {block_info} ({range_str})"
+
+
+def format_context_output(
+    file_path: str,
+    lines: List[dict],
+    start_line: int,
+    end_line: int,
+    target_line: int,
+    block_type: str = "",
+    block_name: str = "",
+) -> None:
+    """
+    Print file content with context highlighting the target line.
+
+    Args:
+        file_path: Path to the file
+        lines: List of {num, content} dicts
+        start_line: First line number
+        end_line: Last line number
+        target_line: The line to highlight
+        block_type: Type of block (function, class, etc.)
+        block_name: Name of the block
+    """
+    print(format_context_header(file_path, block_type, block_name, start_line, end_line))
+    print()
+
+    width = len(str(end_line))
+
+    for line_data in lines:
+        num = line_data.get("num", "?")
+        content = line_data.get("content", "")
+
+        is_target = num == target_line
+        line_num = yellow(f"{num:>{width}}") if is_target else dim(f"{num:>{width}}")
+        separator = dim("│")
+        marker = yellow("←") if is_target else " "
+
+        print(f"  {line_num} {separator} {content} {marker}")
