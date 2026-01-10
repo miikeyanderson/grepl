@@ -89,14 +89,22 @@ def format_json_output(data, raw: bool = False):
 
     Args:
         data: Data to serialize
-        raw: If True, print raw JSON; if False, return formatted string
+        raw: If True, print JSON; if False, return formatted string
 
     Returns:
         JSON string if raw=False, otherwise None
     """
+    import os
+    import sys
+
     json_str = json.dumps(data, indent=2)
+
     if raw:
-        print(json_str)
+        # Use Rich syntax highlighting for TTY, plain JSON when piped
+        if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+            console.print_json(json_str)
+        else:
+            print(json_str)
     else:
         return json_str
 

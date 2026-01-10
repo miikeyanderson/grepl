@@ -271,6 +271,8 @@ def _source_tag(source: str) -> str:
         return badge("hybrid", Colors.BRIGHT_MAGENTA)
     if source == "semantic":
         return badge("semantic", Colors.BRIGHT_GREEN)
+    if source == "ast":
+        return badge("ast", Colors.BRIGHT_BLUE)
     return badge("grep", Colors.BRIGHT_YELLOW)
 
 

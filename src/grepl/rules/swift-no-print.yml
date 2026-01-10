@@ -1,0 +1,8 @@
+# Detect print() statements in Swift code
+# Use: grepl find --strategy codemod --ast-rule swift-no-print --lang swift
+id: swift-no-print
+language: swift
+severity: warning
+message: "print() statement found - consider using proper logging"
+rule:
+  pattern: print($$$ARGS)

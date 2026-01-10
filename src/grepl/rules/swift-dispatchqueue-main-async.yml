@@ -1,0 +1,8 @@
+# Detect DispatchQueue.main.async usage in Swift
+# Use: grepl find --ast-rule swift-dispatchqueue-main-async --lang swift
+id: swift-dispatchqueue-main-async
+language: swift
+severity: info
+message: "DispatchQueue.main.async found - consider using @MainActor"
+rule:
+  pattern: DispatchQueue.main.async { $$$BODY }

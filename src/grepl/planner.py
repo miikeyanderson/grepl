@@ -1,22 +1,209 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 
 
 Mode = Literal["exact", "semantic", "hybrid"]
+Strategy = Literal["explore", "codemod", "grep"]
 
 
 @dataclass(frozen=True)
 class QueryPlan:
     run_grep: bool
     run_semantic: bool
+    run_ast: bool
     grep_pattern: Optional[str]
     grep_fixed: bool
     semantic_query: Optional[str]
+    ast_patterns: tuple[str, ...]
+    ast_rules: tuple[str, ...]
+    ast_language: Optional[str]
+    ast_exhaustive: bool
     mode: Mode
     confidence: float
+
+    def describe(self) -> str:
+        """Return human-readable description of the execution plan."""
+        stages = []
+        if self.run_semantic:
+            stages.append("semantic")
+        if self.run_grep:
+            stages.append("grep")
+        if self.run_ast:
+            mode = "exhaustive" if self.ast_exhaustive else "narrow"
+            stages.append(f"ast({mode})")
+        return " → ".join(stages) if stages else "none"
+
+
+@dataclass
+class ExecutionPlan:
+    """Rich execution plan with estimated counts and reasoning."""
+    query_plan: QueryPlan
+    query: str
+    path: str
+
+    # Estimated counts (populated during execution)
+    semantic_candidate_count: int = 0
+    grep_file_count: int = 0
+    grep_match_count: int = 0
+    ast_file_count: int = 0
+    ast_match_count: int = 0
+
+    # Caps for AST stage
+    ast_top_files: int = 100
+    ast_max_matches: int = 500
+
+    # Reasoning for each stage
+    stage_reasons: Dict[str, str] = field(default_factory=dict)
+
+    def add_reason(self, stage: str, reason: str):
+        """Add reasoning for why a stage runs."""
+        self.stage_reasons[stage] = reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "query": self.query,
+            "path": self.path,
+            "pipeline": self.query_plan.describe(),
+            "confidence": self.query_plan.confidence,
+            "stages": {
+                "semantic": {
+                    "enabled": self.query_plan.run_semantic,
+                    "query": self.query_plan.semantic_query,
+                    "estimated_candidates": self.semantic_candidate_count,
+                    "reason": self.stage_reasons.get("semantic", ""),
+                } if self.query_plan.run_semantic else None,
+                "grep": {
+                    "enabled": self.query_plan.run_grep,
+                    "pattern": self.query_plan.grep_pattern,
+                    "fixed": self.query_plan.grep_fixed,
+                    "estimated_files": self.grep_file_count,
+                    "estimated_matches": self.grep_match_count,
+                    "reason": self.stage_reasons.get("grep", ""),
+                } if self.query_plan.run_grep else None,
+                "ast": {
+                    "enabled": self.query_plan.run_ast,
+                    "patterns": list(self.query_plan.ast_patterns),
+                    "rules": list(self.query_plan.ast_rules),
+                    "language": self.query_plan.ast_language,
+                    "exhaustive": self.query_plan.ast_exhaustive,
+                    "estimated_files": self.ast_file_count,
+                    "estimated_matches": self.ast_match_count,
+                    "reason": self.stage_reasons.get("ast", ""),
+                } if self.query_plan.run_ast else None,
+            },
+        }
+
+    def format_human(self) -> str:
+        """Format plan for human-readable output with Rich formatting."""
+        from rich.console import Console
+        from rich.text import Text
+        import io
+
+        p = self.query_plan
+        buffer = io.StringIO()
+        console = Console(file=buffer, force_terminal=True, width=100)
+
+        # Header section
+        header = Text()
+        header.append("Pipeline: ", style="bold cyan")
+        header.append(p.describe(), style="white")
+        console.print(header)
+
+        line = Text()
+        line.append("Query: ", style="dim")
+        line.append(self.query or "(none)", style="white")
+        console.print(line)
+
+        line = Text()
+        line.append("Path: ", style="dim")
+        line.append(self.path, style="white")
+        console.print(line)
+
+        line = Text()
+        line.append("Confidence: ", style="dim")
+        line.append(f"{p.confidence:.2f}", style="green")
+        console.print(line)
+        console.print()
+
+        # Semantic Stage
+        if p.run_semantic:
+            console.print(Text("Semantic Stage:", style="bold magenta"))
+            line = Text("  Query: ", style="dim")
+            line.append(str(p.semantic_query), style="white")
+            console.print(line)
+            if self.semantic_candidate_count:
+                line = Text("  Estimated candidates: ", style="dim")
+                line.append(str(self.semantic_candidate_count), style="green")
+                console.print(line)
+            if reason := self.stage_reasons.get("semantic"):
+                line = Text("  Why: ", style="dim")
+                line.append(reason, style="italic")
+                console.print(line)
+            console.print()
+
+        # Grep Stage
+        if p.run_grep:
+            console.print(Text("Grep Stage:", style="bold yellow"))
+            line = Text("  Pattern: ", style="dim")
+            line.append(str(p.grep_pattern), style="white")
+            console.print(line)
+            line = Text("  Fixed string: ", style="dim")
+            line.append(str(p.grep_fixed), style="white")
+            console.print(line)
+            if self.grep_file_count:
+                line = Text("  Estimated files: ", style="dim")
+                line.append(str(self.grep_file_count), style="green")
+                console.print(line)
+            if self.grep_match_count:
+                line = Text("  Estimated matches: ", style="dim")
+                line.append(str(self.grep_match_count), style="green")
+                console.print(line)
+            if reason := self.stage_reasons.get("grep"):
+                line = Text("  Why: ", style="dim")
+                line.append(reason, style="italic")
+                console.print(line)
+            console.print()
+
+        # AST Stage
+        if p.run_ast:
+            console.print(Text("AST Stage:", style="bold blue"))
+            if p.ast_patterns:
+                line = Text("  Patterns: ", style="dim")
+                line.append(str(list(p.ast_patterns)), style="white")
+                console.print(line)
+            if p.ast_rules:
+                line = Text("  Rules: ", style="dim")
+                line.append(str(list(p.ast_rules)), style="white")
+                console.print(line)
+            if p.ast_language:
+                line = Text("  Language: ", style="dim")
+                line.append(p.ast_language, style="white")
+                console.print(line)
+            line = Text("  Mode: ", style="dim")
+            mode_text = "exhaustive (full repo)" if p.ast_exhaustive else "narrow (filtered files)"
+            line.append(mode_text, style="white")
+            console.print(line)
+            if not p.ast_exhaustive:
+                line = Text("  File cap: ", style="dim")
+                line.append(str(self.ast_top_files), style="green")
+                console.print(line)
+                line = Text("  Match cap: ", style="dim")
+                line.append(str(self.ast_max_matches), style="green")
+                console.print(line)
+            if self.ast_file_count:
+                line = Text("  Estimated files to scan: ", style="dim")
+                line.append(str(self.ast_file_count), style="green")
+                console.print(line)
+            if reason := self.stage_reasons.get("ast"):
+                line = Text("  Why: ", style="dim")
+                line.append(reason, style="italic")
+                console.print(line)
+
+        return buffer.getvalue().rstrip()
 
 
 # Treat '.' as a literal by default since it's common in identifiers and filenames.
@@ -96,19 +283,73 @@ def analyze_query(
     grep_only: bool = False,
     semantic_only: bool = False,
     precise: bool = False,
+    ast_patterns: Optional[List[str]] = None,
+    ast_rules: Optional[List[str]] = None,
+    ast_language: Optional[str] = None,
+    ast_exhaustive: bool = False,
+    strategy: Optional[Strategy] = None,
 ) -> QueryPlan:
-    """Analyze query to decide whether to run grep, semantic, or both."""
+    """Analyze query to decide whether to run grep, semantic, ast, or combinations."""
     q = query.strip()
-    if not q:
+    ast_patterns = ast_patterns or []
+    ast_rules = ast_rules or []
+    run_ast = bool(ast_patterns or ast_rules)
+
+    if not q and not run_ast:
         return QueryPlan(
             run_grep=False,
             run_semantic=False,
+            run_ast=False,
             grep_pattern=None,
             grep_fixed=False,
             semantic_query=None,
+            ast_patterns=tuple(ast_patterns),
+            ast_rules=tuple(ast_rules),
+            ast_language=ast_language,
+            ast_exhaustive=ast_exhaustive,
             mode="exact",
             confidence=0.0,
         )
+
+    # Handle AST-only with no query: don't run semantic/grep, just AST
+    if not q and run_ast:
+        # If no query but AST patterns/rules provided, run AST-only
+        # Use exhaustive if specified, otherwise still AST-only (no narrowing possible)
+        return QueryPlan(
+            run_grep=False,
+            run_semantic=False,
+            run_ast=True,
+            grep_pattern=None,
+            grep_fixed=False,
+            semantic_query=None,
+            ast_patterns=tuple(ast_patterns),
+            ast_rules=tuple(ast_rules),
+            ast_language=ast_language,
+            ast_exhaustive=ast_exhaustive or True,  # Force exhaustive when no narrowing possible
+            mode="exact",
+            confidence=0.8 if ast_exhaustive else 0.5,
+        )
+
+    # Handle strategy presets
+    if strategy == "codemod":
+        # AST-only exhaustive search
+        return QueryPlan(
+            run_grep=False,
+            run_semantic=False,
+            run_ast=True,
+            grep_pattern=None,
+            grep_fixed=False,
+            semantic_query=None,
+            ast_patterns=tuple(ast_patterns),
+            ast_rules=tuple(ast_rules),
+            ast_language=ast_language,
+            ast_exhaustive=True,
+            mode="exact",
+            confidence=0.9,
+        )
+    elif strategy == "grep":
+        # Grep-only
+        grep_only = True
 
     if grep_only and semantic_only:
         # Prefer explicit grep in conflict.
@@ -214,9 +455,14 @@ def analyze_query(
     return QueryPlan(
         run_grep=run_grep,
         run_semantic=run_semantic,
+        run_ast=run_ast,
         grep_pattern=grep_pattern,
         grep_fixed=grep_fixed,
         semantic_query=semantic_query,
+        ast_patterns=tuple(ast_patterns),
+        ast_rules=tuple(ast_rules),
+        ast_language=ast_language,
+        ast_exhaustive=ast_exhaustive,
         mode=mode,
         confidence=float(max(0.0, min(1.0, confidence))),
     )

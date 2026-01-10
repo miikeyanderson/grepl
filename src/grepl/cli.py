@@ -16,8 +16,16 @@ from . import __version__
 from .embedder import check_ollama, check_model
 from .chunker import chunk_codebase
 from .store import index_chunks, search, clear_index, get_stats, has_index
-from .planner import analyze_query
+from .planner import analyze_query, Strategy, ExecutionPlan
 from .ranker import Hit, RankWeights, merge_results, rerank
+from .ast_grep import (
+    check_ast_grep,
+    format_ast_grep_install_hint,
+    run_ast_grep_multi,
+    AstGrepConfig,
+    resolve_rule_file,
+    list_available_rules,
+)
 from .utils.formatters import format_json_output
 from .utils.tree_formatter import (
     format_exact_results,
@@ -46,7 +54,53 @@ from .utils.tree_formatter import (
 console = Console()
 
 
-@click.group()
+class GreplGroup(click.Group):
+    """Custom Click group with formatted help output."""
+
+    def format_help(self, ctx, formatter):
+        """Override to print custom formatted help."""
+        self.format_custom_help()
+
+    def format_custom_help(self):
+        """Print beautifully formatted help."""
+        # Header
+        print(f"\n{badge('GREPL', Colors.BRIGHT_CYAN)} {dim('v' + __version__)} {dim('─')} {dim('Semantic code search')}\n")
+
+        # Commands section
+        print(f"  {Colors.BOLD}Commands{Colors.RESET}\n")
+
+        commands = [
+            ("find", "Hybrid + AST search", "grepl find \"error\" --ast \"try { $$ }\"", True),
+            ("exact", "Pattern search (ripgrep)", "grepl exact \"def main\" -p src/", False),
+            ("search", "Semantic search", "grepl search \"auth logic\"", False),
+            ("read", "Read file with context", "grepl read src/cli.py:50", False),
+            ("context", "Show function at line", "grepl context src/cli.py:100", False),
+            ("index", "Index codebase", "grepl index", False),
+            ("status", "Check index status", "grepl status", False),
+            ("clear", "Clear search index", "grepl clear", False),
+        ]
+
+        for cmd, desc, example, is_primary in commands:
+            prefix = "├──" if cmd != "clear" else "└──"
+            if is_primary:
+                print(f"  {dim(prefix)} {green(cmd):12} {desc}")
+                print(f"  {dim('│')}   {dim('Example:')} {cyan(example)}")
+            else:
+                print(f"  {dim(prefix)} {cyan(cmd):12} {dim(desc)}")
+
+        # Quick examples section
+        print(f"\n  {Colors.BOLD}Quick Start{Colors.RESET}\n")
+        q = '"'
+        print(f"  {dim('$')} {cyan('grepl index')}                    {dim('# Index current directory')}")
+        print(f"  {dim('$')} {cyan(f'grepl find {q}authentication{q}')}   {dim('# Hybrid search')}")
+        print(f"  {dim('$')} {cyan(f'grepl exact {q}TODO{q} -i')}         {dim('# Case-insensitive grep')}")
+        print(f"  {dim('$')} {cyan('grepl read file.py:100')}         {dim('# Read around line 100')}")
+
+        # Footer
+        print(f"\n  {dim('Run')} {cyan('grepl <command> --help')} {dim('for detailed options')}\n")
+
+
+@click.group(cls=GreplGroup)
 @click.version_option(version=__version__)
 def main():
     """Grepl - Semantic code search powered by ChromaDB + Ollama."""
@@ -271,13 +325,22 @@ def _run_rg(pattern: str, search_path: Path, *, fixed: bool, max_results: int, e
 
 
 @main.command("find")
-@click.argument("query")
+@click.argument("query", default="")
 @click.option("-k", "--top-k", default=10, show_default=True, help="Number of results")
 @click.option("-p", "--path", default=".", help="Search path")
 @click.option("--lang", default=None, help="Limit to languages (e.g. py,ts,swift)")
 @click.option("--grep-only", is_flag=True, help="Only use grep")
 @click.option("--semantic-only", is_flag=True, help="Only use semantic")
 @click.option("--precise", is_flag=True, help="Require grep confirmation")
+@click.option("--ast", "ast_patterns", multiple=True, help="AST pattern (repeatable)")
+@click.option("--ast-rule", "ast_rules", multiple=True, help="AST rule file (repeatable)")
+@click.option("--ast-lang", default=None, help="Language for AST parsing")
+@click.option("--exhaustive", is_flag=True, help="Run AST on entire repo (slow)")
+@click.option("--ast-top-files", default=100, show_default=True, help="Max files to scan with AST")
+@click.option("--ast-max-matches", default=500, show_default=True, help="Max AST matches to return")
+@click.option("--ast-optional", is_flag=True, help="Skip AST if sg not installed (warn instead of error)")
+@click.option("--strategy", type=click.Choice(["explore", "codemod", "grep"]), default=None, help="Search strategy preset")
+@click.option("--plan", "show_plan", is_flag=True, help="Show execution plan without running")
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
 def find_cmd(
     query: str,
@@ -287,34 +350,134 @@ def find_cmd(
     grep_only: bool,
     semantic_only: bool,
     precise: bool,
+    ast_patterns: tuple,
+    ast_rules: tuple,
+    ast_lang: Optional[str],
+    exhaustive: bool,
+    ast_top_files: int,
+    ast_max_matches: int,
+    ast_optional: bool,
+    strategy: Optional[str],
+    show_plan: bool,
     json_output: bool,
 ):
-    """Hybrid search: combines exact matching (ripgrep) with semantic search (ChromaDB).
+    """Hybrid search: combines exact matching (ripgrep), semantic search (ChromaDB), and AST (ast-grep).
 
     Modes:
       • Auto (default): chooses grep vs semantic vs hybrid based on the query.
       • --grep-only: exact matches only (no indexing required).
-      • --semantic-only: semantic matches only (requires: grepl index + Ollama running).
+      • --semantic-only: semantic matches only (requires: grepl index + Ollama).
+      • --ast: structural code search (requires: ast-grep installed).
+
+    Strategies:
+      • explore: semantic → grep → ast (default when --ast provided)
+      • codemod: ast exhaustive (for refactoring)
+      • grep: grep only (fast)
 
     Examples:
-      grepl find "TopNavBar" -p Faithflow/Shared/DesignSystem/Components/Headers
-      grepl find "where do we store onboarding completion" -p Faithflow/App
-      grepl find "save push token after login" -p Faithflow/System/Notifications
+      grepl find "error handling" -k 5
+      grepl find "TopNavBar" --grep-only
+      grepl find "authentication flow" --semantic-only
 
-      # Force mode
-      grepl find "registerDeviceToken" -p Faithflow/System/Notifications --grep-only
-      grepl find "listen for customer info updates" -p Faithflow/System/IAP --semantic-only
+      # AST search (structural)
+      grepl find "retry logic" --ast "try { $$ } catch { $$ }" --ast-lang swift
+      grepl find --ast "DispatchQueue.main.async { $$ }" --ast-lang swift
 
-      # Notes
-      • Semantic search requires an index: grepl index <path>
-      • Semantic search requires Ollama: ollama serve (and model: nomic-embed-text)
+      # Strategy presets
+      grepl find --strategy codemod --ast "print($$)" --ast-lang swift  # Full repo AST
+      grepl find "error" --strategy explore --ast "catch { $$ }"        # Narrow then AST
+
+      # Show plan without executing
+      grepl find "auth" --ast "guard let $$ else { return }" --plan
     """
     start_time = time.time()
     project_path = Path(path).resolve()
     exts = _lang_to_exts(lang)
 
-    plan = analyze_query(query, grep_only=grep_only, semantic_only=semantic_only, precise=precise)
+    # Resolve rule files before building plan
+    resolved_rules: List[str] = []
+    rule_sources: Dict[str, str] = {}
+    for rule_name in ast_rules:
+        resolved_path, source = resolve_rule_file(rule_name, project_path)
+        if resolved_path:
+            resolved_rules.append(str(resolved_path))
+            rule_sources[rule_name] = source
+        else:
+            if not json_output:
+                format_error(f"Rule not found: {rule_name}")
+                available = list_available_rules(project_path)
+                all_rules = available["project"] + available["user"] + available["builtin"]
+                if all_rules:
+                    print(f"  {dim('Available rules:')} {', '.join(all_rules)}")
+            else:
+                print(json.dumps({"error": f"Rule not found: {rule_name}"}))
+            sys.exit(1)
+
+    # Build query plan with AST options
+    plan = analyze_query(
+        query,
+        grep_only=grep_only,
+        semantic_only=semantic_only,
+        precise=precise,
+        ast_patterns=list(ast_patterns),
+        ast_rules=tuple(resolved_rules),
+        ast_language=ast_lang,
+        ast_exhaustive=exhaustive,
+        strategy=strategy,  # type: ignore
+    )
     mode = plan.mode
+
+    # Create ExecutionPlan for richer output
+    exec_plan = ExecutionPlan(
+        query_plan=plan,
+        query=query,
+        path=path,
+        ast_top_files=ast_top_files,
+        ast_max_matches=ast_max_matches,
+    )
+
+    # Add reasoning for each stage
+    if plan.run_semantic:
+        exec_plan.add_reason("semantic", "Query contains natural language or concept terms")
+    if plan.run_grep:
+        if plan.grep_fixed:
+            exec_plan.add_reason("grep", f"Exact match for quoted term: {plan.grep_pattern}")
+        else:
+            exec_plan.add_reason("grep", f"Pattern search for identifier: {plan.grep_pattern}")
+    if plan.run_ast:
+        if plan.ast_exhaustive:
+            exec_plan.add_reason("ast", "Exhaustive mode: scanning entire repository")
+        else:
+            exec_plan.add_reason("ast", "Narrow mode: will scan files from grep/semantic hits")
+
+    # Handle --plan flag (dry run)
+    if show_plan:
+        if json_output:
+            format_json_output(exec_plan.to_dict(), raw=True)
+        else:
+            print(f"\n{badge('PLAN', Colors.BRIGHT_YELLOW)} {dim('Execution plan for query')}\n")
+            for line in exec_plan.format_human().split("\n"):
+                print(f"  {line}")
+            print()
+        return
+
+    # Check AST dependencies if needed
+    skip_ast = False
+    if plan.run_ast and not check_ast_grep():
+        if ast_optional:
+            # Warn but continue without AST
+            skip_ast = True
+            if not json_output:
+                print(f"  {yellow('!')} ast-grep (sg) not installed - skipping AST stage")
+                print(f"    {dim('Install with:')} {cyan('brew install ast-grep')}")
+                print()
+        else:
+            if json_output:
+                print(json.dumps({"error": "ast-grep (sg) not installed", "hint": "brew install ast-grep"}))
+            else:
+                format_error("ast-grep (sg) not installed")
+                print(format_ast_grep_install_hint())
+            sys.exit(1)
 
     # For natural-language queries, treat grep matches as a weaker signal than semantic.
     # This prevents a single extracted token from dominating the ranking.
@@ -331,6 +494,7 @@ def find_cmd(
 
     grep_hits: List[Hit] = []
     semantic_hits: List[Hit] = []
+    ast_hits: List[Hit] = []
 
     # Grep
     if plan.run_grep and plan.grep_pattern:
@@ -375,24 +539,60 @@ def find_cmd(
                     )
                 )
 
+    # AST (ast-grep)
+    if plan.run_ast and not skip_ast:
+        ast_config = AstGrepConfig(
+            patterns=list(plan.ast_patterns),
+            rule_files=list(plan.ast_rules),
+            language=plan.ast_language,
+            exhaustive=plan.ast_exhaustive,
+        )
+
+        # Determine file set for AST: prefer grep hits > semantic candidates > exhaustive
+        ast_files: Optional[List[str]] = None
+        if not plan.ast_exhaustive:
+            if grep_hits:
+                # Narrow to files that had grep matches, capped by ast_top_files
+                all_files = list(set(h.file_path for h in grep_hits))
+                ast_files = all_files[:ast_top_files]
+            elif semantic_hits:
+                # Narrow to files from semantic search, capped by ast_top_files
+                all_files = list(set(h.file_path for h in semantic_hits))
+                ast_files = all_files[:ast_top_files]
+
+        ast_hits = run_ast_grep_multi(
+            config=ast_config,
+            files=ast_files,
+            root_path=project_path,
+        )
+
+        # Cap the number of AST matches returned
+        if len(ast_hits) > ast_max_matches:
+            ast_hits = ast_hits[:ast_max_matches]
+
     # Merge + rank
-    merged = merge_results(grep_hits, semantic_hits, overlap_lines=3)
-    ranked = rerank(merged, weights=RankWeights(), max_per_file=3)
+    merged = merge_results(grep_hits, semantic_hits, ast_hits, overlap_lines=3)
+    ranked = rerank(merged, weights=RankWeights(), max_per_file=3, ast_exhaustive=plan.ast_exhaustive)
 
     # Reflect what actually ran/returned.
     effective_mode = mode
-    if grep_hits and not semantic_hits:
-        effective_mode = "exact"
-    elif semantic_hits and not grep_hits:
-        effective_mode = "semantic"
-    elif semantic_hits and grep_hits:
+    sources_present = []
+    if grep_hits:
+        sources_present.append("grep")
+    if semantic_hits:
+        sources_present.append("semantic")
+    if ast_hits:
+        sources_present.append("ast")
+
+    if len(sources_present) == 1:
+        effective_mode = sources_present[0] if sources_present[0] != "grep" else "exact"
+    elif len(sources_present) >= 2:
         effective_mode = "hybrid"
 
     if precise:
-        ranked_precise = [h for h in ranked if h.grep_score > 0]
+        ranked_precise = [h for h in ranked if h.grep_score > 0 or h.ast_score > 0]
         if ranked_precise:
             ranked = ranked_precise
-            effective_mode = "exact" if not semantic_hits else effective_mode
 
     ranked = ranked[: max(0, top_k)]
 
@@ -401,6 +601,7 @@ def find_cmd(
         payload = {
             "query": query,
             "mode": effective_mode,
+            "plan": plan.describe(),
             "time_ms": elapsed_ms,
             "results": [
                 {
@@ -411,6 +612,8 @@ def find_cmd(
                     "score": h.score,
                     "grep_score": h.grep_score,
                     "semantic_score": h.semantic_score,
+                    "ast_score": h.ast_score,
+                    "ast_pattern": h.ast_pattern,
                     "preview": h.preview,
                     "symbols": h.symbols,
                 }

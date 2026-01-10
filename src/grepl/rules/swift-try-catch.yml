@@ -1,0 +1,20 @@
+# Detect try-catch blocks in Swift
+# Use: grepl find --ast-rule swift-try-catch --lang swift
+id: swift-try-catch
+language: swift
+severity: info
+message: "try-catch block found"
+rule:
+  any:
+    - pattern: |
+        do {
+          $$$TRY_BODY
+        } catch {
+          $$$CATCH_BODY
+        }
+    - pattern: |
+        do {
+          $$$TRY_BODY
+        } catch $ERR {
+          $$$CATCH_BODY
+        }
