@@ -193,6 +193,7 @@ class GreplDaemon:
         self.start_time = time.time()
         self.running = False
         self.change_queue: Queue = Queue()
+        self.server: Optional[uvicorn.Server] = None
 
         self.app = FastAPI(title="Grepl Daemon")
         self._setup_routes()
@@ -291,13 +292,15 @@ class GreplDaemon:
             log_level="info",
             access_log=False
         )
-        server = uvicorn.Server(config)
-        server.run()
+        self.server = uvicorn.Server(config)
+        self.server.run()
 
     def stop(self):
         """Stop the daemon."""
         self.running = False
         self.index.flush()
+        if self.server:
+            self.server.should_exit = True
         if self.socket_path.exists():
             self.socket_path.unlink()
 

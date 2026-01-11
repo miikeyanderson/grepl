@@ -1,7 +1,7 @@
 import unittest
 
 
-from grepl.ranker import Hit, merge_results, rerank
+from grepl.ranker import Hit, compute_lexical_overlap, merge_results, rerank
 
 
 class TestRanker(unittest.TestCase):
@@ -49,6 +49,14 @@ class TestRanker(unittest.TestCase):
         ]
         ranked = rerank(hits, max_per_file=3)
         self.assertLessEqual(sum(1 for h in ranked if h.file_path == "a.py"), 3)
+
+    def test_compute_lexical_overlap(self):
+        overlap = compute_lexical_overlap(
+            "find auth session token",
+            "def handle_auth_session(token):\n    pass",
+            ["handle_auth_session"],
+        )
+        self.assertGreaterEqual(overlap, 0.5)
 
 
 if __name__ == "__main__":

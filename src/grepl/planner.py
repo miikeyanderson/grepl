@@ -215,6 +215,24 @@ _DOT_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_.-]+\b")
 _FILE_EXT_RE = re.compile(r"\.[a-zA-Z0-9]{1,6}\b")
 
 
+def is_identifier_like_query(query: str) -> bool:
+    """Heuristic to detect identifier-like or short technical queries."""
+    q = query.strip()
+    if not q:
+        return False
+
+    if _CAMEL_RE.search(q) or _SNAKE_RE.search(q) or _DOT_IDENT_RE.search(q):
+        return True
+    if _FILE_EXT_RE.search(q):
+        return True
+
+    words = re.findall(r"[A-Za-z0-9_]+", q)
+    if len(words) <= 2 and any(len(w) >= 3 for w in words):
+        return True
+
+    return False
+
+
 def _extract_quoted(query: str) -> list[str]:
     parts: list[str] = []
     for m in _QUOTED_RE.finditer(query):

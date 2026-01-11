@@ -12,12 +12,49 @@ from chromadb.config import Settings
 
 from .chunker import CodeChunk, build_rich_text
 from .embedder import get_embeddings, get_embedding, check_ollama, check_model
+from .planner import is_identifier_like_query
 from .query_expander import expand_query, is_natural_language_query
 
 # Store data in ~/.grepl
 GREPPY_DIR = Path.home() / ".grepl"
 CHROMA_DIR = GREPPY_DIR / "chroma"
 METADATA_DIR = GREPPY_DIR / "metadata"
+
+SEMANTIC_SCORE_FLOOR = 0.18
+SEMANTIC_SCORE_CEILING = 0.95
+SEMANTIC_EXPANSION_PENALTY = 0.9
+
+
+def normalize_semantic_scores(scores: List[float]) -> List[float]:
+    """Normalize semantic scores to [0,1] per query."""
+    if not scores:
+        return []
+    min_score = min(scores)
+    max_score = max(scores)
+    if max_score - min_score < 1e-6:
+        return [max(0.0, min(1.0, s)) for s in scores]
+    return [max(0.0, min(1.0, (s - min_score) / (max_score - min_score))) for s in scores]
+
+
+def apply_semantic_confidence_bounds(
+    score: float,
+    *,
+    floor: float = SEMANTIC_SCORE_FLOOR,
+    ceiling: float = SEMANTIC_SCORE_CEILING,
+) -> float:
+    """Clamp low-confidence semantic scores and cap the ceiling."""
+    if score < floor:
+        return 0.0
+    return min(score, ceiling)
+
+
+def _distance_to_score(distance: float) -> float:
+    """Convert Chroma distance to a bounded similarity score."""
+    if distance <= 2.0:
+        score = 1.0 - (distance / 2.0)
+    else:
+        score = 1.0 / (1.0 + distance)
+    return max(0.0, min(1.0, score))
 
 
 def get_collection_name(project_path: Path) -> str:
@@ -143,7 +180,7 @@ def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool 
         return []
 
     # Expand query for natural language searches
-    if use_expansion and is_natural_language_query(query):
+    if use_expansion and is_natural_language_query(query) and not is_identifier_like_query(query):
         queries = expand_query(query, max_expansions=3)
         query_embeddings = get_embeddings(queries)
 
@@ -159,16 +196,25 @@ def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool 
             for j in range(len(results["ids"][0])):
                 chunk_id = results["ids"][0][j]
                 distance = float(results["distances"][0][j])
-                score = 1.0 - (distance / 2.0) if distance <= 2.0 else 1.0 / (1.0 + distance)
-                score = max(0.0, min(1.0, score))
+                raw_score = _distance_to_score(distance)
+                penalty = 1.0 if i == 0 else SEMANTIC_EXPANSION_PENALTY
+                weighted_score = raw_score * penalty
 
-                if chunk_id not in all_results or score > all_results[chunk_id]["score"]:
+                if chunk_id not in all_results or weighted_score > all_results[chunk_id]["score_weighted"]:
                     all_results[chunk_id] = {
                         "id": chunk_id,
                         "document": results["documents"][0][j],
                         "metadata": results["metadatas"][0][j],
-                        "score": score,
+                        "score_raw": raw_score,
+                        "score_weighted": weighted_score,
                     }
+
+        # Normalize semantic scores per query
+        weighted_scores = [r["score_weighted"] for r in all_results.values()]
+        normalized_scores = normalize_semantic_scores(weighted_scores)
+        for r, normalized in zip(all_results.values(), normalized_scores):
+            r["score_normalized"] = normalized
+            r["score"] = apply_semantic_confidence_bounds(normalized)
 
         # Sort by score and take top results
         sorted_results = sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:limit]
@@ -192,6 +238,8 @@ def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool 
                 "end_line": meta.get("end_line"),
                 "content": r["document"],
                 "score": r["score"],
+                "score_raw": r.get("score_raw", 0.0),
+                "score_normalized": r.get("score_normalized", r["score"]),
                 "symbols": symbols,
                 "language": meta.get("language") or "",
                 "last_modified": float(meta.get("last_modified") or 0.0),
@@ -223,27 +271,24 @@ def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool 
             symbols = []
 
         distance = float(results["distances"][0][i])
-        # With cosine distance (0..2), map to [0..1] where 1 is best.
-        # For older indexes / other metrics, fall back to a generic bounded transform.
-        if distance <= 2.0:
-            score = 1.0 - (distance / 2.0)
-        else:
-            score = 1.0 / (1.0 + distance)
-        if score < 0.0:
-            score = 0.0
-        if score > 1.0:
-            score = 1.0
+        raw_score = _distance_to_score(distance)
 
         formatted.append({
             "file_path": meta.get("file_path"),
             "start_line": meta.get("start_line"),
             "end_line": meta.get("end_line"),
             "content": results["documents"][0][i],
-            "score": score,
+            "score_raw": raw_score,
             "symbols": symbols,
             "language": meta.get("language") or "",
             "last_modified": float(meta.get("last_modified") or 0.0),
         })
+
+    scores = [r["score_raw"] for r in formatted]
+    normalized_scores = normalize_semantic_scores(scores)
+    for r, normalized in zip(formatted, normalized_scores):
+        r["score_normalized"] = normalized
+        r["score"] = apply_semantic_confidence_bounds(normalized)
 
     return formatted
 

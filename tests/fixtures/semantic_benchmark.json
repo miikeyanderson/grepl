@@ -1,0 +1,17 @@
+{
+  "top_k": 5,
+  "cases": [
+    {
+      "query": "where do we index code chunks",
+      "expected_path": "src/grepl/store.py"
+    },
+    {
+      "query": "how does the cli format find results",
+      "expected_path": "src/grepl/cli.py"
+    },
+    {
+      "query": "query expansion synonyms for search",
+      "expected_path": "src/grepl/query_expander.py"
+    }
+  ]
+}
