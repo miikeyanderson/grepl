@@ -1,6 +1,6 @@
 [project]
 name = "grepl"
-version = "0.2.12"
+version = "0.3.0"
 description = "Explainable code search for humans and AI"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -11,6 +11,11 @@ dependencies = [
     "tree-sitter>=0.20.0",
     "requests>=2.28.0",
     "pygments>=2.14.0",
+    "watchfiles>=0.20.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "numpy>=1.24.0",
+    "httpx>=0.24.0",
 ]
 
 [project.scripts]

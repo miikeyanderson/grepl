@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
+from .daemon import DaemonClient, is_daemon_running, get_socket_path
 from .embedder import (
     check_ollama,
     check_model,
@@ -97,11 +98,12 @@ class GreplGroup(click.Group):
             ("index", "Index codebase", "grepl index", False),
             ("status", "Check index status", "grepl status", False),
             ("model", "Manage embedding models", "grepl model", False),
+            ("daemon", "Manage background daemon", "grepl daemon status", False),
             ("clear", "Clear search index", "grepl clear", False),
         ]
 
-        for cmd, desc, example, is_primary in commands:
-            prefix = "├──" if cmd != "clear" else "└──"
+        for i, (cmd, desc, example, is_primary) in enumerate(commands):
+            prefix = "├──" if i < len(commands) - 1 else "└──"
             if is_primary:
                 print(f"  {dim(prefix)} {green(cmd):12} {desc}")
                 print(f"  {dim('│')}   {dim('Example:')} {cyan(example)}")
@@ -1508,6 +1510,143 @@ def model_use(backend: str):
     label = badge("MODEL", Colors.BRIGHT_CYAN)
     print(f"{label} {green('Switched to')} {cyan(backend)} {dim('─')} {dim(backend_obj['model'])}")
     print(f"\n  {yellow('Note:')} {dim('You may need to reindex with')} {cyan('grepl index . --force')} {dim('if switching between backends')}\n")
+
+
+@main.group(invoke_without_command=True)
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+@click.option("-p", "--path", "path", default=".", type=click.Path(exists=True), help="Project path")
+@click.pass_context
+def daemon(ctx, json_output: bool, path: str):
+    """Manage background daemon for fast queries.
+
+    Run without arguments to show daemon status.
+    Use subcommands to start, stop, or check daemon.
+    """
+    if ctx.invoked_subcommand is None:
+        project_path = Path(path).resolve()
+        client = DaemonClient(project_path)
+        running = client.is_running()
+
+        if json_output:
+            if running:
+                health = client.health()
+                print(json.dumps(health, indent=2))
+            else:
+                print(json.dumps({"status": "stopped", "project_path": str(project_path)}, indent=2))
+            client.close()
+            return
+
+        label = badge("DAEMON", Colors.BRIGHT_CYAN)
+
+        if running:
+            try:
+                health = client.health()
+                uptime_mins = int(health["uptime"] / 60)
+                print(f"\n{label} {green('Running')} {dim('─')} {cyan(str(project_path))}\n")
+                print(f"  {dim('Chunks:')} {health['chunks']}")
+                print(f"  {dim('Uptime:')} {uptime_mins} minutes")
+                print(f"  {dim('Socket:')} {get_socket_path(project_path)}")
+                print(f"\n  {dim('Stop daemon:')} {cyan('grepl daemon stop')}\n")
+            except Exception as e:
+                print(f"\n{label} {yellow('Unhealthy')} {dim('─')} {red(str(e))}\n")
+        else:
+            print(f"\n{label} {dim('Not running')} {dim('─')} {cyan(str(project_path))}\n")
+            print(f"  {dim('Start daemon:')} {cyan('grepl daemon start')}")
+            print(f"  {dim('Daemon will auto-start when using search commands')}\n")
+
+        client.close()
+
+
+@daemon.command(name="start")
+@click.option("-p", "--path", "path", default=".", type=click.Path(exists=True), help="Project path")
+def daemon_start(path: str):
+    """Start daemon for a project."""
+    project_path = Path(path).resolve()
+    client = DaemonClient(project_path)
+
+    if client.is_running():
+        label = badge("DAEMON", Colors.BRIGHT_CYAN)
+        print(f"{label} {yellow('Already running')} {dim('─')} {cyan(str(project_path))}")
+        client.close()
+        return
+
+    label = badge("DAEMON", Colors.BRIGHT_CYAN)
+    print(f"{label} {dim('Starting daemon for')} {cyan(str(project_path))}")
+
+    try:
+        client.ensure_running()
+        print(f"{label} {green('Started')} {dim('─')} {dim('daemon is now running')}")
+    except Exception as e:
+        print(format_error(f"Failed to start daemon: {e}"))
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@daemon.command(name="stop")
+@click.option("-p", "--path", "path", default=".", type=click.Path(exists=True), help="Project path")
+def daemon_stop(path: str):
+    """Stop daemon for a project."""
+    project_path = Path(path).resolve()
+    client = DaemonClient(project_path)
+
+    if not client.is_running():
+        label = badge("DAEMON", Colors.BRIGHT_CYAN)
+        print(f"{label} {dim('Not running')} {dim('─')} {cyan(str(project_path))}")
+        client.close()
+        return
+
+    label = badge("DAEMON", Colors.BRIGHT_CYAN)
+    print(f"{label} {dim('Stopping daemon for')} {cyan(str(project_path))}")
+
+    try:
+        client.shutdown()
+        time.sleep(0.5)
+        print(f"{label} {green('Stopped')} {dim('─')} {dim('daemon has been shut down')}")
+    except Exception as e:
+        print(format_error(f"Failed to stop daemon: {e}"))
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@daemon.command(name="status")
+@click.option("-p", "--path", "path", default=".", type=click.Path(exists=True), help="Project path")
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+def daemon_status(path: str, json_output: bool):
+    """Check daemon status."""
+    project_path = Path(path).resolve()
+    client = DaemonClient(project_path)
+    running = client.is_running()
+
+    if json_output:
+        if running:
+            health = client.health()
+            print(json.dumps(health, indent=2))
+        else:
+            print(json.dumps({"status": "stopped", "project_path": str(project_path)}, indent=2))
+        client.close()
+        return
+
+    label = badge("DAEMON", Colors.BRIGHT_CYAN)
+
+    if running:
+        try:
+            health = client.health()
+            uptime_mins = int(health["uptime"] / 60)
+            print(f"\n{label} {green('Running')}\n")
+            print(f"  {dim('Project:')} {cyan(str(project_path))}")
+            print(f"  {dim('Chunks:')} {health['chunks']}")
+            print(f"  {dim('Uptime:')} {uptime_mins} minutes")
+            print(f"  {dim('Socket:')} {get_socket_path(project_path)}\n")
+        except Exception as e:
+            print(f"\n{label} {yellow('Unhealthy')} {dim('─')} {red(str(e))}\n")
+    else:
+        print(f"\n{label} {dim('Not running')}\n")
+        print(f"  {dim('Project:')} {cyan(str(project_path))}")
+        print(f"  {dim('Start with:')} {cyan('grepl daemon start')}\n")
+
+    client.close()
 
 
 @main.command()

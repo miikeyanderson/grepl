@@ -258,6 +258,21 @@ def clear_index(project_path: Path):
         pass
 
 
+def delete_chunks_for_file(project_path: Path, file_path: str):
+    """Delete all chunks for a specific file from ChromaDB."""
+    collection = get_collection(project_path)
+    collection.delete(where={"file_path": file_path})
+
+
+def upsert_file_chunks(project_path: Path, chunks: List[CodeChunk]) -> int:
+    """Add chunks without clearing existing data."""
+    if not chunks:
+        return 0
+    collection = get_collection(project_path)
+    _index_batch(collection, chunks, project_path)
+    return len(chunks)
+
+
 def get_stats(project_path: Path) -> dict:
     """Get index stats."""
     try:

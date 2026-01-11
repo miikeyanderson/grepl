@@ -524,16 +524,131 @@ SKIP_FILES = {
 }
 
 
-def should_index_file(file_path: Path) -> bool:
+def load_greplignore(project_path: Path) -> List[str]:
+    """Load patterns from .greplignore file."""
+    ignore_file = project_path / ".greplignore"
+    if not ignore_file.exists():
+        return []
+
+    patterns = []
+    try:
+        with open(ignore_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    patterns.append(line)
+    except Exception:
+        return []
+
+    return patterns
+
+
+def _normalize_match_path(path: str) -> str:
+    path = path.replace("\\", "/")
+    if path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")
+
+
+def matches_pattern(path: str, pattern: str, *, is_dir: bool = False) -> bool:
+    """Check if path matches gitignore-style pattern."""
+    from fnmatch import fnmatch
+
+    raw_pattern = pattern.strip()
+    if not raw_pattern:
+        return False
+
+    anchored = raw_pattern.startswith("/")
+    dir_only = raw_pattern.endswith("/")
+    raw_pattern = raw_pattern.strip("/")
+    raw_pattern = raw_pattern.replace("\\", "/")
+    has_slash = "/" in raw_pattern
+
+    path_norm = _normalize_match_path(path)
+
+    if dir_only:
+        parts = [p for p in path_norm.split("/") if p]
+        if not is_dir and parts:
+            parts = parts[:-1]
+
+        candidates = ["/".join(parts[: i + 1]) for i in range(len(parts))]
+
+        if anchored:
+            return any(fnmatch(candidate, raw_pattern) for candidate in candidates)
+
+        if has_slash:
+            return any(
+                fnmatch(candidate, raw_pattern) or fnmatch(candidate, f"*/{raw_pattern}")
+                for candidate in candidates
+            )
+
+        return any(fnmatch(Path(candidate).name, raw_pattern) for candidate in candidates)
+
+    if anchored:
+        return fnmatch(path_norm, raw_pattern)
+
+    if has_slash:
+        return fnmatch(path_norm, raw_pattern) or fnmatch(path_norm, f"*/{raw_pattern}")
+
+    name = Path(path_norm).name
+    return (
+        fnmatch(name, raw_pattern)
+        or fnmatch(path_norm, raw_pattern)
+        or fnmatch(path_norm, f"*/{raw_pattern}")
+    )
+
+
+def _relative_match_path(path: Path, project_root: Optional[Path]) -> str:
+    if project_root:
+        try:
+            return path.relative_to(project_root).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return path.as_posix()
+
+
+def should_index_file(
+    file_path: Path,
+    greplignore_patterns: Optional[List[str]] = None,
+    project_root: Optional[Path] = None,
+) -> bool:
     """Check if file should be indexed."""
+    # Check extension whitelist
+    if file_path.suffix.lower() not in CODE_EXTENSIONS:
+        return False
+
+    # Check hardcoded skip files
     if file_path.name in SKIP_FILES:
         return False
-    return file_path.suffix.lower() in CODE_EXTENSIONS
+
+    # Check .greplignore patterns
+    if greplignore_patterns:
+        rel_path = _relative_match_path(file_path, project_root)
+        for pattern in greplignore_patterns:
+            if matches_pattern(rel_path, pattern, is_dir=False):
+                return False
+
+    return True
 
 
-def should_skip_dir(dir_name: str) -> bool:
+def should_skip_dir(
+    dir_path: Path,
+    greplignore_patterns: Optional[List[str]] = None,
+    project_root: Optional[Path] = None,
+) -> bool:
     """Check if directory should be skipped."""
-    return dir_name in SKIP_DIRS or dir_name.startswith(".")
+    # Always skip hardcoded patterns
+    if dir_path.name in SKIP_DIRS or dir_path.name.startswith('.'):
+        return True
+
+    # Check .greplignore patterns
+    if greplignore_patterns:
+        for pattern in greplignore_patterns:
+            rel_path = _relative_match_path(dir_path, project_root)
+            if matches_pattern(rel_path, pattern, is_dir=True):
+                return True
+
+    return False
 
 
 def chunk_file(file_path: Path) -> List[CodeChunk]:
@@ -603,13 +718,19 @@ def chunk_file(file_path: Path) -> List[CodeChunk]:
 
 def walk_codebase(root_path: Path) -> Generator[Path, None, None]:
     """Walk codebase and yield files to index."""
+    greplignore_patterns = load_greplignore(root_path)
+
     for dirpath, dirnames, filenames in os.walk(root_path):
         # Filter out skip directories
-        dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not should_skip_dir(Path(dirpath) / d, greplignore_patterns, root_path)
+        ]
 
         for filename in filenames:
             file_path = Path(dirpath) / filename
-            if should_index_file(file_path):
+            if should_index_file(file_path, greplignore_patterns, root_path):
                 yield file_path
 
 
