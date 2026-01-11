@@ -20,6 +20,7 @@ from .embedder import (
     get_backend_info,
     list_available_backends,
     set_preferred_backend,
+    get_embeddings,
 )
 from .chunker import chunk_codebase, chunk_file, collect_file_metadata
 from .store import (
@@ -33,9 +34,16 @@ from .store import (
     store_index_metadata,
     get_changed_files,
     get_collection,
+    update_code_graph,
+    delete_code_graph_for_file,
 )
-from .planner import analyze_query, Strategy, ExecutionPlan
-from .ranker import Hit, RankWeights, merge_results, rerank
+from .planner import analyze_query, Strategy, ExecutionPlan, profile_query
+from .ranker import Hit, RankWeights, merge_results, rerank, AdaptiveWeights
+from .diversity import DiversityConfig
+from .user_model import load_profile, record_file_access, record_query as record_user_query
+from .session import load_session, save_session
+from .ltr import SearchEvent, log_search_event, load_ltr_weights, train_ltr
+from .code_graph import find_callers, find_implementations, imports_for_file
 from .ast_grep import (
     check_ast_grep,
     format_ast_grep_install_hint,
@@ -141,7 +149,8 @@ def main():
 @main.command()
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--force", "-f", is_flag=True, help="Force full reindex")
-def index(path: str, force: bool):
+@click.option("--warm", is_flag=True, help="Pre-warm embedding cache")
+def index(path: str, force: bool, warm: bool):
     """Index a codebase for semantic search.
 
     Uses incremental indexing by default - only indexes new/modified files.
@@ -161,6 +170,10 @@ def index(path: str, force: bool):
     if not check_model():
         format_error("Model 'nomic-embed-text' not found", hint=f"Pull with: {cyan('ollama pull nomic-embed-text')}")
         sys.exit(1)
+
+    if warm:
+        format_index_progress("Warming embedding cache...")
+        get_embeddings(["def", "class", "import"])
 
     # Collect metadata for all current files
     format_index_progress("Scanning files...")
@@ -207,6 +220,7 @@ def index(path: str, force: bool):
                     results = collection.get(where={"file_path": deleted_file})
                     if results and results.get("ids"):
                         collection.delete(ids=results["ids"])
+                    delete_code_graph_for_file(deleted_file)
                 except Exception:
                     pass
             format_index_progress(f"Removed {deleted_count} deleted files", done=True)
@@ -219,6 +233,7 @@ def index(path: str, force: bool):
                     results = collection.get(where={"file_path": modified_file})
                     if results and results.get("ids"):
                         collection.delete(ids=results["ids"])
+                    delete_code_graph_for_file(modified_file)
                 except Exception:
                     pass
     else:
@@ -267,6 +282,8 @@ def index(path: str, force: bool):
             progress.update(task, description="Done")
 
         format_index_progress(f"Indexed {len(chunks)} chunks", done=True)
+        update_code_graph(chunks)
+        format_index_progress("Updated code graph", done=True)
 
     # Store metadata for next incremental update
     store_index_metadata(project_path, current_files_metadata)
@@ -291,7 +308,8 @@ def index(path: str, force: bool):
 @click.option("--limit", "-n", default=10, help="Number of results (default: 10)")
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
 @click.option("--path", "-p", default=".", help="Path to search")
-def search_cmd(query: str, limit: int, json_output: bool, path: str):
+@click.option("--llm-expand", is_flag=True, help="Use LLM to expand semantic queries")
+def search_cmd(query: str, limit: int, json_output: bool, path: str, llm_expand: bool):
     """Semantic search across indexed codebase."""
     project_path = Path(path).resolve()
 
@@ -310,7 +328,7 @@ def search_cmd(query: str, limit: int, json_output: bool, path: str):
             format_error("Codebase not indexed", hint=f"Run: {cyan(f'grepl index {path}')}")
         sys.exit(1)
 
-    results = search(project_path, query, limit)
+    results = search(project_path, query, limit, llm_expand=llm_expand)
 
     if json_output:
         format_json_output(results, raw=True)
@@ -451,6 +469,14 @@ def _run_rg(pattern: str, search_path: Path, *, fixed: bool, max_results: int, e
 @click.option("--strategy", type=click.Choice(["explore", "codemod", "grep"]), default=None, help="Search strategy preset")
 @click.option("--plan", "show_plan", is_flag=True, help="Show execution plan without running")
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+@click.option("--llm-expand", is_flag=True, help="Use LLM to expand semantic queries")
+@click.option("--diversity", type=click.Choice(["high", "medium", "low"]), default="medium", show_default=True)
+@click.option("--weights", type=click.Choice(["adaptive", "fixed"]), default="adaptive", show_default=True)
+@click.option("--personalized/--no-personalized", default=True, show_default=True, help="Personalize ranking using history")
+@click.option("--current-file", default=None, help="Current file for context-aware ranking")
+@click.option("--cursor-line", type=int, default=None, help="Cursor line for context-aware ranking")
+@click.option("--callers", is_flag=True, help="Show callers of the query symbol")
+@click.option("--implementations", is_flag=True, help="Show implementations of the query symbol")
 @click.option("--rank-semantic", type=float, default=None, help="Override semantic weight")
 @click.option("--rank-grep", type=float, default=None, help="Override grep weight")
 @click.option("--rank-ast", type=float, default=None, help="Override AST weight")
@@ -477,6 +503,14 @@ def find_cmd(
     strategy: Optional[str],
     show_plan: bool,
     json_output: bool,
+    llm_expand: bool,
+    diversity: str,
+    weights: str,
+    personalized: bool,
+    current_file: Optional[str],
+    cursor_line: Optional[int],
+    callers: bool,
+    implementations: bool,
     rank_semantic: Optional[float],
     rank_grep: Optional[float],
     rank_ast: Optional[float],
@@ -512,11 +546,23 @@ def find_cmd(
       grepl find --strategy codemod --ast "print($$)" --ast-lang swift  # Full repo AST
       grepl find "error" --strategy explore --ast "catch { $$ }"        # Narrow then AST
 
+      # Graph-aware modes
+      grepl find "AuthService" --callers
+      grepl find "Validator" --implementations
+
       # Show plan without executing
       grepl find "auth" --ast "guard let $$ else { return }" --plan
     """
     start_time = time.time()
     project_path = Path(path).resolve()
+    session_state = load_session()
+
+    if current_file or cursor_line is not None:
+        session_state.update_focus(current_file, cursor_line)
+        save_session(session_state)
+
+    if personalized:
+        record_user_query(query)
 
     # Validate path exists
     if not project_path.exists():
@@ -582,6 +628,24 @@ def find_cmd(
         ast_top_files=ast_top_files,
         ast_max_matches=ast_max_matches,
     )
+
+    related_imports = []
+    if session_state.current_file:
+        try:
+            related_imports = imports_for_file(session_state.current_file)
+        except Exception:
+            related_imports = []
+
+    graph_files: Set[str] = set()
+    graph_symbols: Set[str] = set()
+    if callers:
+        for symbol, file_path in find_callers(query):
+            graph_symbols.add(symbol)
+            graph_files.add(file_path)
+    if implementations:
+        for symbol, file_path in find_implementations(query):
+            graph_symbols.add(symbol)
+            graph_files.add(file_path)
 
     # Add reasoning for each stage
     if plan.run_semantic:
@@ -674,7 +738,7 @@ def find_cmd(
                     format_error("Codebase not indexed", hint=f"Run: {cyan(f'grepl index {path}')}")
                 sys.exit(1)
         else:
-            raw = search(project_path, plan.semantic_query, max(10, top_k * 3))
+            raw = search(project_path, plan.semantic_query, max(10, top_k * 3), llm_expand=llm_expand)
             if exts:
                 raw = [r for r in raw if Path(r.get("file_path", "")).suffix in exts]
             for r in raw:
@@ -731,7 +795,7 @@ def find_cmd(
 
     # Merge + rank
     merged = merge_results(grep_hits, semantic_hits, ast_hits, overlap_lines=3)
-    weights = RankWeights.from_env().with_overrides(
+    base_weights = RankWeights.from_env().with_overrides(
         semantic=rank_semantic,
         grep=rank_grep,
         ast=rank_ast,
@@ -741,12 +805,33 @@ def find_cmd(
         recency_boost=rank_recency_boost,
         language_boost=rank_language_boost,
     )
+    if weights == "adaptive":
+        weights = AdaptiveWeights.resolve(profile_query(query), base_weights)
+    else:
+        weights = base_weights
+
+    user_profile = load_profile() if personalized else None
+    ltr_weights = load_ltr_weights()
+
+    diversity_map = {
+        "high": DiversityConfig(lambda_param=0.6, min_semantic_distance=0.4),
+        "medium": DiversityConfig(lambda_param=0.7, min_semantic_distance=0.3),
+        "low": DiversityConfig(lambda_param=0.85, min_semantic_distance=0.15),
+    }
+    diversity_config = diversity_map.get(diversity)
     ranked = rerank(
         merged,
         weights=weights,
         max_per_file=3,
         ast_exhaustive=plan.ast_exhaustive,
         query=query,
+        user_profile=user_profile,
+        session_state=session_state,
+        related_imports=related_imports,
+        graph_files=graph_files or None,
+        graph_symbols=graph_symbols or None,
+        ltr_weights=ltr_weights,
+        diversity=diversity_config,
     )
 
     # Reflect what actually ran/returned.
@@ -769,7 +854,37 @@ def find_cmd(
         if ranked_precise:
             ranked = ranked_precise
 
+    if callers or implementations:
+        if graph_files or graph_symbols:
+            ranked = [
+                h for h in ranked
+                if (graph_files and h.file_path in graph_files)
+                or (graph_symbols and set(h.symbols) & graph_symbols)
+            ]
+
     ranked = ranked[: max(0, top_k)]
+
+    if ranked:
+        results_for_feedback = [
+            {
+                "file_path": h.file_path,
+                "start_line": h.start_line,
+                "end_line": h.end_line,
+                "grep_score": h.grep_score,
+                "semantic_score": h.semantic_score,
+                "ast_score": h.ast_score,
+                "symbol_boost": h.symbol_boost,
+                "lexical_boost": h.lexical_boost,
+                "recency_boost": h.recency_boost,
+                "language_boost": h.language_boost,
+                "user_affinity_boost": h.user_affinity_boost,
+                "context_boost": h.context_boost,
+                "graph_boost": h.graph_boost,
+            }
+            for h in ranked
+        ]
+        session_state.record_search(query, results_for_feedback)
+        save_session(session_state)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     if json_output:
@@ -799,6 +914,9 @@ def find_cmd(
                     "lexical_boost": h.lexical_boost,
                     "recency_boost": h.recency_boost,
                     "language_boost": h.language_boost,
+                    "user_affinity_boost": h.user_affinity_boost,
+                    "context_boost": h.context_boost,
+                    "graph_boost": h.graph_boost,
                 }
                 for h in ranked
             ],
@@ -1086,6 +1204,7 @@ def read(location: str, context: int, json_output: bool):
         grepl read src/auth.py -c 100       # More context
     """
     # Parse location: file.py, file.py:line, or file.py:start-end
+    match_line = None
     if ":" in location:
         file_part, line_part = location.rsplit(":", 1)
         if "-" in line_part:
@@ -1112,6 +1231,7 @@ def read(location: str, context: int, json_output: bool):
                 half = context // 2
                 start_line = max(1, center_line - half)
                 end_line = center_line + half
+                match_line = center_line
             except ValueError:
                 # Maybe it's part of the path (e.g., C:\path on Windows)
                 file_part = location
@@ -1121,6 +1241,7 @@ def read(location: str, context: int, json_output: bool):
         file_part = location
         start_line = 1
         end_line = context
+        match_line = start_line
 
     file_path = Path(file_part)
     if not file_path.exists():
@@ -1135,6 +1256,20 @@ def read(location: str, context: int, json_output: bool):
             tip="Use grepl exact to search for files",
         )
         sys.exit(ExitCode.PATH_ERROR)
+
+    record_file_access(str(file_path))
+    if match_line is None:
+        match_line = start_line
+    session_state = load_session()
+    selected_idx = session_state.match_read(str(file_path), match_line)
+    if selected_idx is not None and session_state.last_results:
+        event = SearchEvent(
+            query=session_state.last_query or "",
+            results=session_state.last_results,
+            selected_idx=selected_idx,
+            timestamp=time.time(),
+        )
+        log_search_event(event)
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -1552,6 +1687,19 @@ def model_use(backend: str):
     label = badge("MODEL", Colors.BRIGHT_CYAN)
     print(f"{label} {green('Switched to')} {cyan(backend)} {dim('─')} {dim(backend_obj['model'])}")
     print(f"\n  {yellow('Note:')} {dim('You may need to reindex with')} {cyan('grepl index . --force')} {dim('if switching between backends')}\n")
+
+
+@main.command()
+@click.option("--min-events", default=5, show_default=True, help="Minimum feedback events required")
+def train(min_events: int):
+    """Train the learned-to-rank model from feedback."""
+    ok, message = train_ltr(min_events=min_events)
+    if ok:
+        label = badge("TRAIN", Colors.BRIGHT_GREEN)
+        print(f"{label} {green('LTR model trained')} {dim('─')} {dim(message)}")
+    else:
+        label = badge("TRAIN", Colors.BRIGHT_YELLOW)
+        print(f"{label} {yellow('LTR training skipped')} {dim('─')} {dim(message)}")
 
 
 @main.group(invoke_without_command=True)

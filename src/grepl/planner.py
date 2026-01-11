@@ -37,6 +37,13 @@ class QueryPlan:
         return " → ".join(stages) if stages else "none"
 
 
+@dataclass(frozen=True)
+class QueryProfile:
+    query_type: Literal["identifier", "natural_language", "pattern"]
+    confidence: float
+    features: Dict[str, float]
+
+
 @dataclass
 class ExecutionPlan:
     """Rich execution plan with estimated counts and reasoning."""
@@ -231,6 +238,64 @@ def is_identifier_like_query(query: str) -> bool:
         return True
 
     return False
+
+
+def profile_query(query: str) -> QueryProfile:
+    q = query.strip()
+    words = re.findall(r"[A-Za-z0-9_]+", q)
+    word_count = len(words)
+    if word_count == 0:
+        return QueryProfile(query_type="identifier", confidence=0.5, features={"word_count": 0})
+
+    camel = len([w for w in words if _CAMEL_RE.search(w)])
+    camel_ratio = camel / max(1, word_count)
+
+    stop = {
+        "the", "a", "an", "is", "are", "in", "for", "to", "of", "and", "or", "how", "where", "what",
+        "find", "show", "with", "from", "does", "do", "using", "use",
+    }
+    stop_count = len([w for w in words if w.lower() in stop])
+    stop_ratio = stop_count / max(1, word_count)
+
+    has_regex = 1.0 if _REGEX_META_RE.search(q) else 0.0
+
+    identifier_score = 0.0
+    natural_score = 0.0
+    pattern_score = 0.0
+
+    if is_identifier_like_query(q):
+        identifier_score += 0.6
+    if camel_ratio >= 0.4:
+        identifier_score += 0.3
+
+    if word_count >= 4 or stop_ratio >= 0.3:
+        natural_score += 0.6
+    if word_count >= 6:
+        natural_score += 0.2
+
+    if has_regex:
+        pattern_score += 0.7
+    if re.search(r"[\\^$|?*+()\\[\\]{}]", q):
+        pattern_score += 0.2
+
+    scores = {
+        "identifier": identifier_score,
+        "natural_language": natural_score,
+        "pattern": pattern_score,
+    }
+    query_type = max(scores, key=scores.get)
+    confidence = max(0.2, min(1.0, scores[query_type]))
+
+    return QueryProfile(
+        query_type=query_type,  # type: ignore
+        confidence=confidence,
+        features={
+            "word_count": float(word_count),
+            "camel_ratio": float(camel_ratio),
+            "stop_ratio": float(stop_ratio),
+            "regex": float(has_regex),
+        },
+    )
 
 
 def _extract_quoted(query: str) -> list[str]:

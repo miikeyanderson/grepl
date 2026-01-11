@@ -18,8 +18,9 @@ from pydantic import BaseModel
 from watchfiles import watch
 
 from ..chunker import chunk_file
-from ..embedder import get_embedding
-from ..store import delete_chunks_for_file, get_collection, upsert_file_chunks
+from ..embedder import get_embedding, get_embeddings
+from ..session import load_session, save_session
+from ..store import delete_chunks_for_file, get_collection, upsert_file_chunks, delete_code_graph_for_file
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 class SearchRequest(BaseModel):
     query: str
     limit: int = 10
+    current_file: Optional[str] = None
+    cursor_line: Optional[int] = None
 
 
 class SearchResult(BaseModel):
@@ -91,8 +94,13 @@ class InMemoryIndex:
         query_vec = np.array(query_embedding)
 
         # Normalize vectors for cosine similarity
-        query_norm = query_vec / np.linalg.norm(query_vec)
-        embeddings_norm = self.embeddings / np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        query_norm_val = np.linalg.norm(query_vec)
+        if query_norm_val == 0:
+            return []
+        query_norm = query_vec / query_norm_val
+        embeddings_norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        embeddings_norms[embeddings_norms == 0] = 1.0
+        embeddings_norm = self.embeddings / embeddings_norms
 
         # Compute cosine similarity
         similarities = np.dot(embeddings_norm, query_norm)
@@ -162,6 +170,7 @@ class InMemoryIndex:
 
         for file_path in dirty:
             delete_chunks_for_file(self.project_path, file_path)
+            delete_code_graph_for_file(file_path)
             path = Path(file_path)
             if path.exists():
                 chunks = chunk_file(path)
@@ -205,6 +214,10 @@ class GreplDaemon:
         @self.app.post("/search", response_model=List[SearchResult])
         def search(req: SearchRequest):
             try:
+                if req.current_file or req.cursor_line is not None:
+                    state = load_session()
+                    state.update_focus(req.current_file, req.cursor_line)
+                    save_session(state)
                 results = self.index.search(req.query, req.limit)
                 return results
             except Exception as e:
@@ -266,6 +279,9 @@ class GreplDaemon:
         logger.info(f"Socket: {self.socket_path}")
 
         self.running = True
+
+        # Pre-warm common query embeddings
+        get_embeddings(["def", "class", "import"])
 
         # Load index into memory
         self.index.load()

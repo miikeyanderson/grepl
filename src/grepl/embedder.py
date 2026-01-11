@@ -2,6 +2,11 @@
 
 import json
 import os
+import sqlite3
+import threading
+import time
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,6 +29,9 @@ MODEL_DIMENSIONS = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
 }
+
+_CACHE_DIR = Path.home() / ".grepl" / "embedding_cache"
+_CACHE_PATH = _CACHE_DIR / "embeddings.sqlite"
 
 
 class EmbeddingBackend(ABC):
@@ -50,6 +58,73 @@ class EmbeddingBackend(ABC):
         pass
 
 
+class EmbeddingCache:
+    """SQLite-backed embedding cache."""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        self.db_path = db_path or _CACHE_PATH
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _init_db(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    model TEXT NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (model, text_hash)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model)"
+            )
+            conn.commit()
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+    def get_many(self, model: str, texts: List[str]) -> Dict[str, List[float]]:
+        if not texts:
+            return {}
+        hashes = [self._hash_text(t) for t in texts]
+        placeholders = ",".join("?" for _ in hashes)
+        query = f"SELECT text_hash, embedding FROM embeddings WHERE model=? AND text_hash IN ({placeholders})"
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(query, [model, *hashes]).fetchall()
+        cached: Dict[str, List[float]] = {}
+        for text_hash, embedding_json in rows:
+            try:
+                cached[text_hash] = json.loads(embedding_json)
+            except Exception:
+                continue
+        return cached
+
+    def set_many(self, model: str, items: Dict[str, List[float]]) -> None:
+        if not items:
+            return
+        now = time.time()
+        rows = [
+            (model, text_hash, json.dumps(embedding), now)
+            for text_hash, embedding in items.items()
+        ]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO embeddings (model, text_hash, embedding, created_at) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+    def warm(self, model: str, texts: List[str]) -> None:
+        """Ensure embeddings are cached for the provided texts."""
+        _ = get_embeddings(texts, model=model)
+
+
 class OllamaBackend(EmbeddingBackend):
     """Ollama embedding backend."""
 
@@ -71,8 +146,8 @@ class OllamaBackend(EmbeddingBackend):
                 )
                 response.raise_for_status()
                 embeddings.append(response.json()["embedding"])
-            except requests.exceptions.RequestException:
-                embeddings.append([0.0] * dim)
+            except requests.exceptions.RequestException as exc:
+                raise RuntimeError("Ollama embedding request failed") from exc
 
         return embeddings
 
@@ -102,7 +177,7 @@ class OpenAIBackend(EmbeddingBackend):
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not self.api_key:
-            return [[0.0] * self.get_dimension()] * len(texts)
+            raise RuntimeError("OpenAI API key is not configured")
 
         try:
             response = requests.post(
@@ -120,8 +195,8 @@ class OpenAIBackend(EmbeddingBackend):
             response.raise_for_status()
             data = response.json()
             return [item["embedding"] for item in data["data"]]
-        except requests.exceptions.RequestException:
-            return [[0.0] * self.get_dimension()] * len(texts)
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError("OpenAI embedding request failed") from exc
 
     def embed_single(self, text: str) -> List[float]:
         return self.embed([text])[0]
@@ -135,6 +210,15 @@ class OpenAIBackend(EmbeddingBackend):
 
 # Global backend instance (lazy initialization)
 _backend: Optional[EmbeddingBackend] = None
+_embedding_cache: Optional[EmbeddingCache] = None
+
+
+def get_embedding_cache() -> EmbeddingCache:
+    """Get the embedding cache, initializing if needed."""
+    global _embedding_cache
+    if _embedding_cache is None:
+        _embedding_cache = EmbeddingCache()
+    return _embedding_cache
 
 
 def get_backend() -> EmbeddingBackend:
@@ -187,13 +271,68 @@ def get_embeddings(texts: List[str], model: Optional[str] = None) -> List[List[f
         List of embedding vectors
     """
     backend = get_backend()
+    cache = get_embedding_cache()
 
     # If model specified and different from backend, create new backend
     if model and isinstance(backend, OllamaBackend) and model != backend.model:
-        temp_backend = OllamaBackend(model=model)
-        return temp_backend.embed(texts)
+        backend = OllamaBackend(model=model)
 
-    return backend.embed(texts)
+    model_name = getattr(backend, "model", "default")
+    cached = cache.get_many(model_name, texts)
+
+    missing_texts: List[str] = []
+    missing_hashes: List[str] = []
+    for text in texts:
+        text_hash = EmbeddingCache._hash_text(text)
+        if text_hash not in cached:
+            missing_texts.append(text)
+            missing_hashes.append(text_hash)
+
+    if missing_texts:
+        batch_size = 8
+        max_workers = min(8, (os.cpu_count() or 4))
+        results: Dict[str, List[float]] = {}
+
+        def _embed_batch(batch_texts: List[str]) -> List[List[float]]:
+            return backend.embed(batch_texts)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for i in range(0, len(missing_texts), batch_size):
+                batch = missing_texts[i:i + batch_size]
+                future = executor.submit(_embed_batch, batch)
+                futures[future] = (i, batch)
+
+            for future in as_completed(futures):
+                start_idx, batch = futures[future]
+                try:
+                    embeddings = future.result()
+                except Exception:
+                    embeddings = None
+                # Skip caching failed or malformed batches; we'll fall back to
+                # zero vectors at read time without poisoning the cache.
+                if embeddings is None or len(embeddings) != len(batch):
+                    continue
+                dim = backend.get_dimension()
+                for offset, embedding in enumerate(embeddings):
+                    if not embedding or len(embedding) != dim:
+                        continue
+                    if not any(value != 0.0 for value in embedding):
+                        continue
+                    text_hash = missing_hashes[start_idx + offset]
+                    results[text_hash] = embedding
+
+        cache.set_many(model_name, results)
+        cached.update(results)
+
+    out: List[List[float]] = []
+    for text in texts:
+        text_hash = EmbeddingCache._hash_text(text)
+        embedding = cached.get(text_hash)
+        if embedding is None:
+            embedding = [0.0] * backend.get_dimension()
+        out.append(embedding)
+    return out
 
 
 def get_embedding(text: str, model: Optional[str] = None) -> List[float]:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Generator, Optional, Tuple
 
 from dataclasses import field
+from .treesitter_chunker import chunk_file_with_treesitter
 
 # File extensions to index
 CODE_EXTENSIONS = {
@@ -43,6 +44,12 @@ class CodeChunk:
     symbols: List[str] = field(default_factory=list)
     language: str = ""
     last_modified: float = 0.0
+    parent_symbol: str = ""
+    chunk_type: str = ""
+    docstring: str = ""
+    imports: List[str] = field(default_factory=list)
+    calls: List[str] = field(default_factory=list)
+    inherits: List[str] = field(default_factory=list)
 
     @property
     def id(self) -> str:
@@ -77,6 +84,21 @@ def build_rich_text(chunk: "CodeChunk", project_root: Optional[Path] = None) -> 
     if chunk.symbols:
         symbols_str = ", ".join(chunk.symbols[:5])  # Limit to 5 symbols
         parts.append(f"[SYMBOLS={symbols_str}]")
+
+    if chunk.parent_symbol:
+        parts.append(f"[PARENT={chunk.parent_symbol}]")
+
+    if chunk.chunk_type:
+        parts.append(f"[TYPE={chunk.chunk_type}]")
+
+    if chunk.imports:
+        imports_str = ", ".join(chunk.imports[:5])
+        parts.append(f"[IMPORTS={imports_str}]")
+
+    if chunk.docstring:
+        doc = chunk.docstring.strip().replace("\n", " ")[:200]
+        if doc:
+            parts.append(f"[DOC={doc}]")
 
     # Add header
     header = " ".join(parts)
@@ -655,9 +677,9 @@ def chunk_file(file_path: Path) -> List[CodeChunk]:
     """Split a file into chunks.
 
     Uses language-aware chunking:
-    - Python: AST-based chunking (most accurate)
-    - Swift, TypeScript, JavaScript, Go, Rust, Java, Kotlin: Regex-based
-    - Other languages: Line-based with symbol extraction
+    - Tree-sitter for supported languages (functions/classes as atomic units)
+    - Python AST fallback if tree-sitter unavailable
+    - Regex/line-based fallback for unsupported languages
     """
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -674,6 +696,30 @@ def chunk_file(file_path: Path) -> List[CodeChunk]:
 
     language = _language_for_path(file_path)
     lines = content.split("\n")
+
+    ts_chunks = chunk_file_with_treesitter(file_path, content, last_modified=last_modified)
+    if ts_chunks:
+        out: List[CodeChunk] = []
+        for chunk in ts_chunks:
+            out.append(
+                CodeChunk(
+                    file_path=chunk.file_path,
+                    start_line=chunk.start_line,
+                    end_line=chunk.end_line,
+                    content=chunk.content,
+                    chunk_hash=hash_content(f"{file_path}:{chunk.start_line}:{chunk.content}"),
+                    symbols=chunk.symbols,
+                    language=chunk.language or language,
+                    last_modified=chunk.last_modified,
+                    parent_symbol=chunk.parent_symbol,
+                    chunk_type=chunk.chunk_type,
+                    docstring=chunk.docstring,
+                    imports=chunk.imports,
+                    calls=chunk.calls,
+                    inherits=chunk.inherits,
+                )
+            )
+        return out
 
     # Python: Use AST-based chunking (most accurate)
     if file_path.suffix.lower() == ".py":

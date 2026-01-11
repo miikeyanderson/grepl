@@ -4,9 +4,17 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
 from .query_expander import get_search_terms
+from .diversity import DiversityConfig, mmr_rerank, dedupe_hits
+from .ltr import score_with_ltr
+
+if TYPE_CHECKING:
+    from .planner import QueryProfile
+    from .session import SessionState
+    from .user_model import UserProfile
 
 
 Source = Literal["grep", "semantic", "hybrid", "ast"]
@@ -38,6 +46,9 @@ class Hit:
     lexical_boost: float = 0.0
     recency_boost: float = 0.0
     language_boost: float = 0.0
+    user_affinity_boost: float = 0.0
+    context_boost: float = 0.0
+    graph_boost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,9 @@ class RankWeights:
     lexical_boost: float = 0.05
     recency_boost: float = 0.03
     language_boost: float = 0.02
+    user_affinity_boost: float = 0.04
+    context_boost: float = 0.05
+    graph_boost: float = 0.04
 
     @staticmethod
     def _env_float(name: str) -> Optional[float]:
@@ -73,6 +87,9 @@ class RankWeights:
             "lexical_boost": cls._env_float("GREPL_RANK_LEXICAL_BOOST"),
             "recency_boost": cls._env_float("GREPL_RANK_RECENCY_BOOST"),
             "language_boost": cls._env_float("GREPL_RANK_LANGUAGE_BOOST"),
+            "user_affinity_boost": cls._env_float("GREPL_RANK_USER_AFFINITY_BOOST"),
+            "context_boost": cls._env_float("GREPL_RANK_CONTEXT_BOOST"),
+            "graph_boost": cls._env_float("GREPL_RANK_GRAPH_BOOST"),
         }
         cleaned = {k: v for k, v in overrides.items() if v is not None}
         return cls(**cleaned) if cleaned else cls()
@@ -87,6 +104,9 @@ class RankWeights:
             "lexical_boost": self.lexical_boost,
             "recency_boost": self.recency_boost,
             "language_boost": self.language_boost,
+            "user_affinity_boost": self.user_affinity_boost,
+            "context_boost": self.context_boost,
+            "graph_boost": self.graph_boost,
         }
         for key, value in overrides.items():
             if value is not None:
@@ -94,10 +114,44 @@ class RankWeights:
         return RankWeights(**values)
 
 
+class AdaptiveWeights:
+    """Adjust ranking weights based on query profile."""
+
+    PRESETS = {
+        "identifier": RankWeights(semantic=0.2, grep=0.7, ast=0.3),
+        "natural_language": RankWeights(semantic=0.8, grep=0.1, ast=0.15),
+        "pattern": RankWeights(semantic=0.1, grep=0.8, ast=0.2),
+    }
+
+    @staticmethod
+    def blend(base: RankWeights, target: RankWeights, confidence: float) -> RankWeights:
+        alpha = max(0.0, min(1.0, confidence))
+        return RankWeights(
+            semantic=base.semantic * (1 - alpha) + target.semantic * alpha,
+            grep=base.grep * (1 - alpha) + target.grep * alpha,
+            ast=base.ast * (1 - alpha) + target.ast * alpha,
+            hybrid_boost=base.hybrid_boost,
+            symbol_boost=base.symbol_boost,
+            lexical_boost=base.lexical_boost,
+            recency_boost=base.recency_boost,
+            language_boost=base.language_boost,
+            user_affinity_boost=base.user_affinity_boost,
+            context_boost=base.context_boost,
+            graph_boost=base.graph_boost,
+        )
+
+    @classmethod
+    def resolve(cls, profile: "QueryProfile", base: RankWeights) -> RankWeights:
+        preset = cls.PRESETS.get(profile.query_type, base)
+        return cls.blend(base, preset, profile.confidence)
+
+
 LANGUAGE_ALIASES = {
     "python": {"py", "python"},
     "typescript": {"ts", "tsx", "typescript"},
     "javascript": {"js", "jsx", "javascript"},
+    "tsx": {"tsx", "typescript"},
+    "jsx": {"jsx", "javascript"},
     "swift": {"swift"},
     "go": {"go", "golang"},
     "rust": {"rs", "rust"},
@@ -165,6 +219,58 @@ def compute_language_match(query: str, language: str) -> float:
     lang = language.lower()
     aliases = LANGUAGE_ALIASES.get(lang, {lang})
     return 1.0 if any(alias in terms for alias in aliases) else 0.0
+
+
+def compute_user_affinity(file_path: str, user_profile: Optional["UserProfile"]) -> float:
+    if not user_profile:
+        return 0.0
+    try:
+        return float(user_profile.affinity_for_file(file_path))
+    except Exception:
+        return 0.0
+
+
+def _related_file_match(file_path: str, related_imports: Iterable[str]) -> bool:
+    if not related_imports:
+        return False
+    path = Path(file_path)
+    stem = path.stem
+    for imp in related_imports:
+        if not imp:
+            continue
+        tail = imp.split(".")[-1].split("/")[-1]
+        if tail == stem or tail in file_path:
+            return True
+    return False
+
+
+def compute_context_match(
+    file_path: str,
+    session_state: Optional["SessionState"],
+    related_imports: Optional[Iterable[str]] = None,
+) -> float:
+    if not session_state or not session_state.current_file:
+        return 0.0
+    current = session_state.current_file
+    if file_path == current:
+        return 1.0
+    try:
+        if Path(file_path).parent == Path(current).parent:
+            return 0.6
+    except Exception:
+        pass
+    if related_imports and _related_file_match(file_path, related_imports):
+        return 0.4
+    return 0.0
+
+
+def compute_graph_match(hit: "Hit", graph_files: Optional[Set[str]], graph_symbols: Optional[Set[str]]) -> float:
+    if graph_files and hit.file_path in graph_files:
+        return 1.0
+    if graph_symbols and hit.symbols:
+        if set(hit.symbols) & graph_symbols:
+            return 1.0
+    return 0.0
 
 
 def _ranges_overlap(a: Tuple[int, int], b: Tuple[int, int], *, within_lines: int = 0) -> bool:
@@ -286,6 +392,11 @@ def score_hit(
     ast_exhaustive: bool = False,
     query: Optional[str] = None,
     now: Optional[float] = None,
+    user_profile: Optional["UserProfile"] = None,
+    session_state: Optional["SessionState"] = None,
+    related_imports: Optional[Iterable[str]] = None,
+    graph_files: Optional[Set[str]] = None,
+    graph_symbols: Optional[Set[str]] = None,
 ) -> float:
     """Score a hit based on source contributions.
 
@@ -326,10 +437,22 @@ def score_hit(
         language_match = compute_language_match(query, hit.language)
         language_boost = weights.language_boost * language_match
 
+    user_affinity = compute_user_affinity(hit.file_path, user_profile)
+    user_affinity_boost = weights.user_affinity_boost * user_affinity
+
+    context_match = compute_context_match(hit.file_path, session_state, related_imports)
+    context_boost = weights.context_boost * context_match
+
+    graph_match = compute_graph_match(hit, graph_files, graph_symbols)
+    graph_boost = weights.graph_boost * graph_match
+
     hit.symbol_boost = sym_boost
     hit.lexical_boost = lexical_boost
     hit.recency_boost = recency_boost
     hit.language_boost = language_boost
+    hit.user_affinity_boost = user_affinity_boost
+    hit.context_boost = context_boost
+    hit.graph_boost = graph_boost
 
     has_grep = g > 0
     has_semantic = se > 0
@@ -340,21 +463,31 @@ def score_hit(
     if has_ast and has_relevance:
         base = (weights.semantic * se) + (weights.grep * g)
         confirmation_boost = 0.20
-        s = base + confirmation_boost + sym_boost + lexical_boost + recency_boost + language_boost
+        s = (
+            base
+            + confirmation_boost
+            + sym_boost
+            + lexical_boost
+            + recency_boost
+            + language_boost
+            + user_affinity_boost
+            + context_boost
+            + graph_boost
+        )
         return float(max(0.0, min(1.0, s)))
 
     # AST only (no relevance signal)
     if has_ast and not has_relevance:
         if ast_exhaustive:
-            return min(1.0, ast + sym_boost + lexical_boost + recency_boost + language_boost)
+            return min(1.0, ast + sym_boost + lexical_boost + recency_boost + language_boost + user_affinity_boost + context_boost + graph_boost)
         else:
-            return min(1.0, ast * 0.7 + sym_boost + lexical_boost + recency_boost + language_boost)
+            return min(1.0, ast * 0.7 + sym_boost + lexical_boost + recency_boost + language_boost + user_affinity_boost + context_boost + graph_boost)
 
     # Single source (no AST)
     if has_semantic and not has_grep:
-        return min(1.0, se + sym_boost + lexical_boost + recency_boost + language_boost)
+        return min(1.0, se + sym_boost + lexical_boost + recency_boost + language_boost + user_affinity_boost + context_boost + graph_boost)
     if has_grep and not has_semantic:
-        return min(1.0, g + sym_boost + lexical_boost + recency_boost + language_boost)
+        return min(1.0, g + sym_boost + lexical_boost + recency_boost + language_boost + user_affinity_boost + context_boost + graph_boost)
 
     # grep + semantic (no AST) - standard hybrid
     if has_grep and has_semantic:
@@ -366,10 +499,13 @@ def score_hit(
             + lexical_boost
             + recency_boost
             + language_boost
+            + user_affinity_boost
+            + context_boost
+            + graph_boost
         )
         return float(max(0.0, min(1.0, s)))
 
-    return sym_boost + lexical_boost + recency_boost + language_boost
+    return sym_boost + lexical_boost + recency_boost + language_boost + user_affinity_boost + context_boost + graph_boost
 
 
 def rerank(
@@ -379,14 +515,55 @@ def rerank(
     max_per_file: int = 3,
     ast_exhaustive: bool = False,
     query: Optional[str] = None,
+    user_profile: Optional["UserProfile"] = None,
+    session_state: Optional["SessionState"] = None,
+    related_imports: Optional[Iterable[str]] = None,
+    graph_files: Optional[Set[str]] = None,
+    graph_symbols: Optional[Set[str]] = None,
+    ltr_weights: Optional[Dict[str, float]] = None,
+    diversity: Optional[DiversityConfig] = None,
 ) -> list[Hit]:
     scored: list[Hit] = []
     now = time.time()
     for h in hits:
-        h.score = score_hit(h, weights, ast_exhaustive=ast_exhaustive, query=query, now=now)
+        h.score = score_hit(
+            h,
+            weights,
+            ast_exhaustive=ast_exhaustive,
+            query=query,
+            now=now,
+            user_profile=user_profile,
+            session_state=session_state,
+            related_imports=related_imports,
+            graph_files=graph_files,
+            graph_symbols=graph_symbols,
+        )
         scored.append(h)
 
+    if ltr_weights:
+        blend = 0.5
+        for h in scored:
+            features = {
+                "grep_score": h.grep_score,
+                "semantic_score": h.semantic_score,
+                "ast_score": h.ast_score,
+                "symbol_boost": h.symbol_boost,
+                "lexical_boost": h.lexical_boost,
+                "recency_boost": h.recency_boost,
+                "language_boost": h.language_boost,
+                "user_affinity_boost": h.user_affinity_boost,
+                "context_boost": h.context_boost,
+                "graph_boost": h.graph_boost,
+            }
+            ltr_score = score_with_ltr(features, ltr_weights)
+            h.score = (h.score * (1 - blend)) + (ltr_score * blend)
+
     scored.sort(key=lambda x: x.score, reverse=True)
+
+    if diversity:
+        scored = mmr_rerank(scored, config=diversity, top_k=None)
+    else:
+        scored = dedupe_hits(scored)
 
     if max_per_file <= 0:
         return scored

@@ -3,8 +3,14 @@
 Expands natural language queries into multiple search terms to improve recall.
 """
 
-from typing import List, Set
+from typing import List, Set, Optional
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+import json
 import re
+
+from .llm_client import LLMClient
 
 # Common code concept synonyms and related terms
 CONCEPT_EXPANSIONS = {
@@ -89,6 +95,15 @@ SEMANTIC_CUE_WORDS = {
     "flow", "logic", "related", "responsible", "dealing",
 }
 
+LLM_CACHE_PATH = Path.home() / ".grepl" / "llm_cache.json"
+
+
+@dataclass
+class QueryIntent:
+    reformulations: List[str]
+    code_patterns: List[str]
+    concepts: List[str]
+
 
 def is_natural_language_query(query: str) -> bool:
     """Check if query appears to be natural language (vs code identifier)."""
@@ -107,6 +122,79 @@ def is_natural_language_query(query: str) -> bool:
         return True
 
     return False
+
+
+def _cache_key(query: str) -> str:
+    return hashlib.md5(query.encode("utf-8")).hexdigest()
+
+
+def _load_llm_cache() -> dict:
+    if not LLM_CACHE_PATH.exists():
+        return {}
+    try:
+        return json.loads(LLM_CACHE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_llm_cache(cache: dict) -> None:
+    LLM_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LLM_CACHE_PATH.write_text(json.dumps(cache, indent=2))
+
+
+def get_query_intent(query: str, *, llm_expand: bool = False) -> QueryIntent:
+    if not llm_expand:
+        expansions = expand_query(query, max_expansions=5)
+        return QueryIntent(reformulations=expansions, code_patterns=[], concepts=[])
+
+    cache = _load_llm_cache()
+    key = _cache_key(query)
+    if key in cache:
+        cached = cache[key]
+        return QueryIntent(
+            reformulations=list(cached.get("reformulations", [query])),
+            code_patterns=list(cached.get("code_patterns", [])),
+            concepts=list(cached.get("concepts", [])),
+        )
+
+    client = LLMClient()
+    intent = None
+    if client.is_available():
+        intent = client.expand_query(query)
+
+    if not intent:
+        expansions = expand_query(query, max_expansions=5)
+        return QueryIntent(reformulations=expansions, code_patterns=[], concepts=[])
+
+    reformulations = intent.get("reformulations") or [query]
+    code_patterns = intent.get("code_patterns") or []
+    concepts = intent.get("concepts") or []
+
+    payload = {
+        "reformulations": reformulations,
+        "code_patterns": code_patterns,
+        "concepts": concepts,
+    }
+    cache[key] = payload
+    _save_llm_cache(cache)
+
+    return QueryIntent(
+        reformulations=list(reformulations),
+        code_patterns=list(code_patterns),
+        concepts=list(concepts),
+    )
+
+
+def get_expanded_queries(query: str, *, llm_expand: bool = False) -> List[str]:
+    intent = get_query_intent(query, llm_expand=llm_expand)
+    if not intent.reformulations:
+        return [query]
+    # Ensure original query is first
+    unique = []
+    for q in [query, *intent.reformulations]:
+        if q not in unique:
+            unique.append(q)
+    return unique
 
 
 def expand_query(query: str, max_expansions: int = 5) -> List[str]:

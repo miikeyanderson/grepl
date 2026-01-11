@@ -13,7 +13,8 @@ from chromadb.config import Settings
 from .chunker import CodeChunk, build_rich_text
 from .embedder import get_embeddings, get_embedding, check_ollama, check_model
 from .planner import is_identifier_like_query
-from .query_expander import expand_query, is_natural_language_query
+from .query_expander import get_expanded_queries, is_natural_language_query
+from .code_graph import index_from_chunks as index_code_graph, clear_file as clear_code_graph_file
 
 # Store data in ~/.grepl
 GREPPY_DIR = Path.home() / ".grepl"
@@ -128,6 +129,8 @@ def index_chunks(project_path: Path, chunks: List[CodeChunk], batch_size: int = 
         _index_batch(collection, batch, project_path)
         total_indexed += len(batch)
 
+    update_code_graph(chunks)
+
     return total_indexed
 
 
@@ -156,13 +159,24 @@ def _index_batch(collection, chunks: List[CodeChunk], project_root: Optional[Pat
                 "symbols": json.dumps(getattr(c, "symbols", []) or []),
                 "language": getattr(c, "language", "") or "",
                 "last_modified": float(getattr(c, "last_modified", 0.0) or 0.0),
+                "parent_symbol": getattr(c, "parent_symbol", "") or "",
+                "chunk_type": getattr(c, "chunk_type", "") or "",
+                "imports": json.dumps(getattr(c, "imports", []) or []),
+                "calls": json.dumps(getattr(c, "calls", []) or []),
+                "inherits": json.dumps(getattr(c, "inherits", []) or []),
             }
             for c in chunks
         ],
     )
 
 
-def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool = True) -> List[dict]:
+def search(
+    project_path: Path,
+    query: str,
+    limit: int = 10,
+    use_expansion: bool = True,
+    llm_expand: bool = False,
+) -> List[dict]:
     """Search indexed codebase.
 
     Args:
@@ -181,7 +195,7 @@ def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool 
 
     # Expand query for natural language searches
     if use_expansion and is_natural_language_query(query) and not is_identifier_like_query(query):
-        queries = expand_query(query, max_expansions=3)
+        queries = get_expanded_queries(query, llm_expand=llm_expand)[:3]
         query_embeddings = get_embeddings(queries)
 
         # Query with each embedding and merge results
@@ -298,6 +312,18 @@ def clear_index(project_path: Path):
     client = get_client()
     name = get_collection_name(project_path)
     try:
+        try:
+            collection = get_collection(project_path)
+            data = collection.get(include=["metadatas"])
+            metadatas = data.get("metadatas", []) if data else []
+            for meta in metadatas:
+                if not meta:
+                    continue
+                fp = meta.get("file_path")
+                if fp:
+                    clear_code_graph_file(fp)
+        except Exception:
+            pass
         client.delete_collection(name)
     except Exception:
         pass
@@ -309,13 +335,26 @@ def delete_chunks_for_file(project_path: Path, file_path: str):
     collection.delete(where={"file_path": file_path})
 
 
+def delete_code_graph_for_file(file_path: str) -> None:
+    """Delete graph data for a specific file."""
+    clear_code_graph_file(file_path)
+
+
 def upsert_file_chunks(project_path: Path, chunks: List[CodeChunk]) -> int:
     """Add chunks without clearing existing data."""
     if not chunks:
         return 0
     collection = get_collection(project_path)
     _index_batch(collection, chunks, project_path)
+    update_code_graph(chunks)
     return len(chunks)
+
+
+def update_code_graph(chunks: List[CodeChunk]) -> None:
+    """Update the code graph for a set of chunks."""
+    if not chunks:
+        return
+    index_code_graph(chunks)
 
 
 def get_stats(project_path: Path) -> dict:

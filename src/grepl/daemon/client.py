@@ -70,11 +70,12 @@ class DaemonClient:
 
         raise TimeoutError(f"Daemon did not start within {timeout}s")
 
-    def search(self, query: str, limit: int = 10) -> List[dict]:
+    def search(self, query: str, limit: int = 10, current_file: Optional[str] = None, cursor_line: Optional[int] = None) -> List[dict]:
         """Search using daemon."""
         self.ensure_running()
 
-        resp = self.client.post("/search", json={"query": query, "limit": limit}, timeout=30.0)
+        payload = {"query": query, "limit": limit, "current_file": current_file, "cursor_line": cursor_line}
+        resp = self.client.post("/search", json=payload, timeout=30.0)
         resp.raise_for_status()
         return resp.json()
 
