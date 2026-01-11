@@ -451,6 +451,14 @@ def _run_rg(pattern: str, search_path: Path, *, fixed: bool, max_results: int, e
 @click.option("--strategy", type=click.Choice(["explore", "codemod", "grep"]), default=None, help="Search strategy preset")
 @click.option("--plan", "show_plan", is_flag=True, help="Show execution plan without running")
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+@click.option("--rank-semantic", type=float, default=None, help="Override semantic weight")
+@click.option("--rank-grep", type=float, default=None, help="Override grep weight")
+@click.option("--rank-ast", type=float, default=None, help="Override AST weight")
+@click.option("--rank-hybrid-boost", type=float, default=None, help="Override hybrid boost")
+@click.option("--rank-symbol-boost", type=float, default=None, help="Override symbol boost")
+@click.option("--rank-lexical-boost", type=float, default=None, help="Override lexical overlap boost")
+@click.option("--rank-recency-boost", type=float, default=None, help="Override recency boost")
+@click.option("--rank-language-boost", type=float, default=None, help="Override language boost")
 def find_cmd(
     query: str,
     top_k: int,
@@ -469,6 +477,14 @@ def find_cmd(
     strategy: Optional[str],
     show_plan: bool,
     json_output: bool,
+    rank_semantic: Optional[float],
+    rank_grep: Optional[float],
+    rank_ast: Optional[float],
+    rank_hybrid_boost: Optional[float],
+    rank_symbol_boost: Optional[float],
+    rank_lexical_boost: Optional[float],
+    rank_recency_boost: Optional[float],
+    rank_language_boost: Optional[float],
 ):
     """Hybrid search: combines exact matching (ripgrep), semantic search (ChromaDB), and AST (ast-grep).
 
@@ -675,6 +691,10 @@ def find_cmd(
                         symbols=list(meta_symbols) if meta_symbols else _extract_symbols(content),
                         grep_score=0.0,
                         semantic_score=float(r.get("score", 0.0)),
+                        semantic_raw_score=float(r.get("score_raw", 0.0)),
+                        semantic_norm_score=float(r.get("score_normalized", r.get("score", 0.0))),
+                        language=str(r.get("language") or ""),
+                        last_modified=float(r.get("last_modified") or 0.0),
                     )
                 )
 
@@ -711,7 +731,23 @@ def find_cmd(
 
     # Merge + rank
     merged = merge_results(grep_hits, semantic_hits, ast_hits, overlap_lines=3)
-    ranked = rerank(merged, weights=RankWeights(), max_per_file=3, ast_exhaustive=plan.ast_exhaustive)
+    weights = RankWeights.from_env().with_overrides(
+        semantic=rank_semantic,
+        grep=rank_grep,
+        ast=rank_ast,
+        hybrid_boost=rank_hybrid_boost,
+        symbol_boost=rank_symbol_boost,
+        lexical_boost=rank_lexical_boost,
+        recency_boost=rank_recency_boost,
+        language_boost=rank_language_boost,
+    )
+    ranked = rerank(
+        merged,
+        weights=weights,
+        max_per_file=3,
+        ast_exhaustive=plan.ast_exhaustive,
+        query=query,
+    )
 
     # Reflect what actually ran/returned.
     effective_mode = mode
@@ -753,10 +789,16 @@ def find_cmd(
                     "score": h.score,
                     "grep_score": h.grep_score,
                     "semantic_score": h.semantic_score,
+                    "semantic_raw_score": h.semantic_raw_score,
+                    "semantic_norm_score": h.semantic_norm_score,
                     "ast_score": h.ast_score,
                     "ast_pattern": h.ast_pattern,
                     "preview": h.preview,
                     "symbols": h.symbols,
+                    "symbol_boost": h.symbol_boost,
+                    "lexical_boost": h.lexical_boost,
+                    "recency_boost": h.recency_boost,
+                    "language_boost": h.language_boost,
                 }
                 for h in ranked
             ],

@@ -143,9 +143,9 @@ def expand_query(query: str, max_expansions: int = 5) -> List[str]:
             for related in CONCEPT_EXPANSIONS[word][:2]:
                 queries.add(f"{query_lower} {related}")
 
-    # Limit total expansions
-    result = list(queries)[:max_expansions]
-    return result
+    # Preserve original query first, then expansions
+    expansions = [q for q in queries if q != query]
+    return [query] + expansions[: max(0, max_expansions - 1)]
 
 
 def get_search_terms(query: str) -> List[str]:

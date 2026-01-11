@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
+
+from .query_expander import get_search_terms
 
 
 Source = Literal["grep", "semantic", "hybrid", "ast"]
@@ -19,6 +23,8 @@ class Hit:
     symbols: list[str]
     grep_score: float = 0.0
     semantic_score: float = 0.0
+    semantic_raw_score: float = 0.0
+    semantic_norm_score: float = 0.0
     ast_score: float = 0.0
     ast_pattern: Optional[str] = None
     ast_rule: Optional[str] = None
@@ -26,15 +32,84 @@ class Hit:
     # Column-level precision (optional, mainly for AST)
     start_col: Optional[int] = None
     end_col: Optional[int] = None
+    language: str = ""
+    last_modified: float = 0.0
+    symbol_boost: float = 0.0
+    lexical_boost: float = 0.0
+    recency_boost: float = 0.0
+    language_boost: float = 0.0
 
 
 @dataclass(frozen=True)
 class RankWeights:
-    semantic: float = 0.55  # Increased from 0.45 for improved embeddings
-    grep: float = 0.25      # Decreased from 0.30
+    """Default ranking weights (override via env or CLI for tuning)."""
+    semantic: float = 0.5
+    grep: float = 0.3
     ast: float = 0.15
-    hybrid_boost: float = 0.10
-    symbol_boost: float = 0.10  # Boost when query matches symbol names
+    hybrid_boost: float = 0.08
+    symbol_boost: float = 0.08
+    lexical_boost: float = 0.05
+    recency_boost: float = 0.03
+    language_boost: float = 0.02
+
+    @staticmethod
+    def _env_float(name: str) -> Optional[float]:
+        value = os.getenv(name)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    @classmethod
+    def from_env(cls) -> "RankWeights":
+        overrides = {
+            "semantic": cls._env_float("GREPL_RANK_SEMANTIC"),
+            "grep": cls._env_float("GREPL_RANK_GREP"),
+            "ast": cls._env_float("GREPL_RANK_AST"),
+            "hybrid_boost": cls._env_float("GREPL_RANK_HYBRID_BOOST"),
+            "symbol_boost": cls._env_float("GREPL_RANK_SYMBOL_BOOST"),
+            "lexical_boost": cls._env_float("GREPL_RANK_LEXICAL_BOOST"),
+            "recency_boost": cls._env_float("GREPL_RANK_RECENCY_BOOST"),
+            "language_boost": cls._env_float("GREPL_RANK_LANGUAGE_BOOST"),
+        }
+        cleaned = {k: v for k, v in overrides.items() if v is not None}
+        return cls(**cleaned) if cleaned else cls()
+
+    def with_overrides(self, **overrides: Optional[float]) -> "RankWeights":
+        values = {
+            "semantic": self.semantic,
+            "grep": self.grep,
+            "ast": self.ast,
+            "hybrid_boost": self.hybrid_boost,
+            "symbol_boost": self.symbol_boost,
+            "lexical_boost": self.lexical_boost,
+            "recency_boost": self.recency_boost,
+            "language_boost": self.language_boost,
+        }
+        for key, value in overrides.items():
+            if value is not None:
+                values[key] = float(value)
+        return RankWeights(**values)
+
+
+LANGUAGE_ALIASES = {
+    "python": {"py", "python"},
+    "typescript": {"ts", "tsx", "typescript"},
+    "javascript": {"js", "jsx", "javascript"},
+    "swift": {"swift"},
+    "go": {"go", "golang"},
+    "rust": {"rs", "rust"},
+    "ruby": {"rb", "ruby"},
+    "java": {"java"},
+    "kotlin": {"kt", "kotlin"},
+    "c": {"c"},
+    "cpp": {"cpp", "c++", "cc", "hpp"},
+    "markdown": {"md", "markdown"},
+    "json": {"json"},
+    "yaml": {"yaml", "yml"},
+}
 
 
 def _extract_query_terms(query: str) -> Set[str]:
@@ -67,6 +142,31 @@ def compute_symbol_boost(query: str, symbols: List[str]) -> float:
     return min(1.0, matches / len(query_terms))
 
 
+def compute_lexical_overlap(query: str, preview: str, symbols: List[str]) -> float:
+    terms = get_search_terms(query)
+    if not terms:
+        return 0.0
+    haystack = f"{preview} {' '.join(symbols)}".lower()
+    matches = sum(1 for term in terms if term in haystack)
+    return min(1.0, matches / len(terms))
+
+
+def compute_recency_score(last_modified: float, *, now: float, half_life_days: float = 30.0) -> float:
+    if last_modified <= 0:
+        return 0.0
+    age_days = max(0.0, (now - last_modified) / 86400.0)
+    return 0.5 ** (age_days / max(1.0, half_life_days))
+
+
+def compute_language_match(query: str, language: str) -> float:
+    if not query or not language:
+        return 0.0
+    terms = set(get_search_terms(query))
+    lang = language.lower()
+    aliases = LANGUAGE_ALIASES.get(lang, {lang})
+    return 1.0 if any(alias in terms for alias in aliases) else 0.0
+
+
 def _ranges_overlap(a: Tuple[int, int], b: Tuple[int, int], *, within_lines: int = 0) -> bool:
     a0, a1 = a
     b0, b1 = b
@@ -78,6 +178,8 @@ def _merge_two(a: Hit, b: Hit) -> Hit:
     end = max(a.end_line, b.end_line)
     grep_score = max(a.grep_score, b.grep_score)
     semantic_score = max(a.semantic_score, b.semantic_score)
+    semantic_raw_score = max(a.semantic_raw_score, b.semantic_raw_score)
+    semantic_norm_score = max(a.semantic_norm_score, b.semantic_norm_score)
     ast_score = max(a.ast_score, b.ast_score)
 
     # Determine source based on which engines contributed
@@ -105,6 +207,8 @@ def _merge_two(a: Hit, b: Hit) -> Hit:
         preview = b.preview if len(b.preview) > len(a.preview) else a.preview
 
     symbols = sorted(set((a.symbols or []) + (b.symbols or [])))
+    language = a.language or b.language
+    last_modified = max(a.last_modified, b.last_modified)
 
     # Merge AST metadata
     ast_pattern = a.ast_pattern or b.ast_pattern
@@ -125,12 +229,16 @@ def _merge_two(a: Hit, b: Hit) -> Hit:
         symbols=symbols,
         grep_score=grep_score,
         semantic_score=semantic_score,
+        semantic_raw_score=semantic_raw_score,
+        semantic_norm_score=semantic_norm_score,
         ast_score=ast_score,
         ast_pattern=ast_pattern,
         ast_rule=ast_rule,
         ast_captures=ast_captures,
         start_col=start_col,
         end_col=end_col,
+        language=language,
+        last_modified=last_modified,
     )
 
 
@@ -177,6 +285,7 @@ def score_hit(
     *,
     ast_exhaustive: bool = False,
     query: Optional[str] = None,
+    now: Optional[float] = None,
 ) -> float:
     """Score a hit based on source contributions.
 
@@ -193,11 +302,34 @@ def score_hit(
     se = float(max(0.0, min(1.0, hit.semantic_score)))
     ast = float(max(0.0, min(1.0, hit.ast_score)))
 
+    if now is None:
+        now = time.time()
+
     # Compute symbol boost if query provided
     sym_boost = 0.0
     if query and hit.symbols:
         sym_match = compute_symbol_boost(query, hit.symbols)
         sym_boost = weights.symbol_boost * sym_match
+
+    lexical_boost = 0.0
+    if query:
+        lexical_match = compute_lexical_overlap(query, hit.preview, hit.symbols)
+        lexical_boost = weights.lexical_boost * lexical_match
+
+    recency_boost = 0.0
+    if hit.last_modified:
+        recency_score = compute_recency_score(hit.last_modified, now=now)
+        recency_boost = weights.recency_boost * recency_score
+
+    language_boost = 0.0
+    if query and hit.language:
+        language_match = compute_language_match(query, hit.language)
+        language_boost = weights.language_boost * language_match
+
+    hit.symbol_boost = sym_boost
+    hit.lexical_boost = lexical_boost
+    hit.recency_boost = recency_boost
+    hit.language_boost = language_boost
 
     has_grep = g > 0
     has_semantic = se > 0
@@ -208,28 +340,36 @@ def score_hit(
     if has_ast and has_relevance:
         base = (weights.semantic * se) + (weights.grep * g)
         confirmation_boost = 0.20
-        s = base + confirmation_boost + sym_boost
+        s = base + confirmation_boost + sym_boost + lexical_boost + recency_boost + language_boost
         return float(max(0.0, min(1.0, s)))
 
     # AST only (no relevance signal)
     if has_ast and not has_relevance:
         if ast_exhaustive:
-            return min(1.0, ast + sym_boost)
+            return min(1.0, ast + sym_boost + lexical_boost + recency_boost + language_boost)
         else:
-            return min(1.0, ast * 0.7 + sym_boost)
+            return min(1.0, ast * 0.7 + sym_boost + lexical_boost + recency_boost + language_boost)
 
     # Single source (no AST)
     if has_semantic and not has_grep:
-        return min(1.0, se + sym_boost)
+        return min(1.0, se + sym_boost + lexical_boost + recency_boost + language_boost)
     if has_grep and not has_semantic:
-        return min(1.0, g + sym_boost)
+        return min(1.0, g + sym_boost + lexical_boost + recency_boost + language_boost)
 
     # grep + semantic (no AST) - standard hybrid
     if has_grep and has_semantic:
-        s = (weights.semantic * se) + (weights.grep * g) + weights.hybrid_boost + sym_boost
+        s = (
+            (weights.semantic * se)
+            + (weights.grep * g)
+            + weights.hybrid_boost
+            + sym_boost
+            + lexical_boost
+            + recency_boost
+            + language_boost
+        )
         return float(max(0.0, min(1.0, s)))
 
-    return sym_boost  # Return symbol boost even if no other signals
+    return sym_boost + lexical_boost + recency_boost + language_boost
 
 
 def rerank(
@@ -241,8 +381,9 @@ def rerank(
     query: Optional[str] = None,
 ) -> list[Hit]:
     scored: list[Hit] = []
+    now = time.time()
     for h in hits:
-        h.score = score_hit(h, weights, ast_exhaustive=ast_exhaustive, query=query)
+        h.score = score_hit(h, weights, ast_exhaustive=ast_exhaustive, query=query, now=now)
         scored.append(h)
 
     scored.sort(key=lambda x: x.score, reverse=True)
