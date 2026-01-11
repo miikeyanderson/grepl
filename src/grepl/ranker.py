@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 
 
 Source = Literal["grep", "semantic", "hybrid", "ast"]
@@ -29,10 +30,41 @@ class Hit:
 
 @dataclass(frozen=True)
 class RankWeights:
-    semantic: float = 0.45
-    grep: float = 0.30
+    semantic: float = 0.55  # Increased from 0.45 for improved embeddings
+    grep: float = 0.25      # Decreased from 0.30
     ast: float = 0.15
     hybrid_boost: float = 0.10
+    symbol_boost: float = 0.10  # Boost when query matches symbol names
+
+
+def _extract_query_terms(query: str) -> Set[str]:
+    """Extract significant terms from a query for symbol matching."""
+    stopwords = {"the", "a", "an", "is", "are", "in", "for", "to", "of", "and", "or", "how", "where", "what", "find"}
+    words = re.findall(r'\w+', query.lower())
+    return {w for w in words if w not in stopwords and len(w) > 2}
+
+
+def compute_symbol_boost(query: str, symbols: List[str]) -> float:
+    """Compute boost based on query term matches in symbols.
+
+    Returns a value between 0.0 and 1.0 indicating how well the symbols match the query.
+    """
+    if not symbols or not query:
+        return 0.0
+
+    query_terms = _extract_query_terms(query)
+    if not query_terms:
+        return 0.0
+
+    # Check each symbol for matches
+    symbol_text = " ".join(symbols).lower()
+    matches = 0
+    for term in query_terms:
+        if term in symbol_text:
+            matches += 1
+
+    # Return ratio of matched terms (max 1.0)
+    return min(1.0, matches / len(query_terms))
 
 
 def _ranges_overlap(a: Tuple[int, int], b: Tuple[int, int], *, within_lines: int = 0) -> bool:
@@ -144,6 +176,7 @@ def score_hit(
     weights: RankWeights = RankWeights(),
     *,
     ast_exhaustive: bool = False,
+    query: Optional[str] = None,
 ) -> float:
     """Score a hit based on source contributions.
 
@@ -152,10 +185,19 @@ def score_hit(
     - semantic/grep = relevance (how related to the query)
     - AST + semantic/grep = high confidence match
     - AST alone = structurally correct but may not be relevant (lower score in explore mode)
+
+    Symbol boost:
+    - If query terms appear in chunk symbols (function/class names), add boost
     """
     g = float(max(0.0, min(1.0, hit.grep_score)))
     se = float(max(0.0, min(1.0, hit.semantic_score)))
     ast = float(max(0.0, min(1.0, hit.ast_score)))
+
+    # Compute symbol boost if query provided
+    sym_boost = 0.0
+    if query and hit.symbols:
+        sym_match = compute_symbol_boost(query, hit.symbols)
+        sym_boost = weights.symbol_boost * sym_match
 
     has_grep = g > 0
     has_semantic = se > 0
@@ -164,35 +206,30 @@ def score_hit(
 
     # AST + relevance = strong confirmation boost
     if has_ast and has_relevance:
-        # AST confirms a relevant match - boost significantly
         base = (weights.semantic * se) + (weights.grep * g)
-        # AST confirmation adds a strong boost (not just weighted addition)
         confirmation_boost = 0.20
-        s = base + confirmation_boost
+        s = base + confirmation_boost + sym_boost
         return float(max(0.0, min(1.0, s)))
 
     # AST only (no relevance signal)
     if has_ast and not has_relevance:
         if ast_exhaustive:
-            # In exhaustive/codemod mode, AST-only is valid
-            return ast
+            return min(1.0, ast + sym_boost)
         else:
-            # In explore mode, AST without relevance is lower priority
-            # Still include but penalize slightly
-            return ast * 0.7
+            return min(1.0, ast * 0.7 + sym_boost)
 
     # Single source (no AST)
     if has_semantic and not has_grep:
-        return se
+        return min(1.0, se + sym_boost)
     if has_grep and not has_semantic:
-        return g
+        return min(1.0, g + sym_boost)
 
     # grep + semantic (no AST) - standard hybrid
     if has_grep and has_semantic:
-        s = (weights.semantic * se) + (weights.grep * g) + weights.hybrid_boost
+        s = (weights.semantic * se) + (weights.grep * g) + weights.hybrid_boost + sym_boost
         return float(max(0.0, min(1.0, s)))
 
-    return 0.0
+    return sym_boost  # Return symbol boost even if no other signals
 
 
 def rerank(
@@ -201,10 +238,11 @@ def rerank(
     weights: RankWeights = RankWeights(),
     max_per_file: int = 3,
     ast_exhaustive: bool = False,
+    query: Optional[str] = None,
 ) -> list[Hit]:
     scored: list[Hit] = []
     for h in hits:
-        h.score = score_hit(h, weights, ast_exhaustive=ast_exhaustive)
+        h.score = score_hit(h, weights, ast_exhaustive=ast_exhaustive, query=query)
         scored.append(h)
 
     scored.sort(key=lambda x: x.score, reverse=True)

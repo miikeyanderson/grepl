@@ -3,9 +3,10 @@
 import ast
 import os
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Generator, Optional
+from typing import List, Generator, Optional, Tuple
 
 from dataclasses import field
 
@@ -48,6 +49,42 @@ class CodeChunk:
         return self.chunk_hash
 
 
+def build_rich_text(chunk: "CodeChunk", project_root: Optional[Path] = None) -> str:
+    """Build enriched text for embedding that includes semantic context.
+
+    Instead of embedding raw code, we prepend metadata that helps the
+    embedding model understand the semantic meaning of the code.
+    """
+    parts = []
+
+    # Language tag
+    if chunk.language:
+        parts.append(f"[LANG={chunk.language}]")
+
+    # File path (use relative path if project_root provided)
+    file_path = chunk.file_path
+    if project_root:
+        try:
+            file_path = str(Path(chunk.file_path).relative_to(project_root))
+        except ValueError:
+            pass
+    parts.append(f"[FILE={file_path}]")
+
+    # Line range
+    parts.append(f"[LINES={chunk.start_line}-{chunk.end_line}]")
+
+    # Symbols (function/class names)
+    if chunk.symbols:
+        symbols_str = ", ".join(chunk.symbols[:5])  # Limit to 5 symbols
+        parts.append(f"[SYMBOLS={symbols_str}]")
+
+    # Add header
+    header = " ".join(parts)
+
+    # Combine header with content
+    return f"{header}\n{chunk.content}"
+
+
 def hash_content(content: str) -> str:
     """Generate hash for content."""
     return hashlib.md5(content.encode()).hexdigest()[:12]
@@ -84,6 +121,232 @@ def _language_for_path(file_path: Path) -> str:
     if ext == ".json":
         return "json"
     return ext.lstrip(".")
+
+
+# Language-specific patterns for extracting function/class definitions
+SYMBOL_PATTERNS = {
+    "swift": [
+        (r'^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?(?:final\s+)?class\s+(\w+)', 'class'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?struct\s+(\w+)', 'struct'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?enum\s+(\w+)', 'enum'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?(?:@\w+\s+)*func\s+(\w+)', 'func'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?protocol\s+(\w+)', 'protocol'),
+        (r'^\s*extension\s+(\w+)', 'extension'),
+    ],
+    "typescript": [
+        (r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)', 'function'),
+        (r'^\s*(?:export\s+)?class\s+(\w+)', 'class'),
+        (r'^\s*(?:export\s+)?interface\s+(\w+)', 'interface'),
+        (r'^\s*(?:export\s+)?type\s+(\w+)', 'type'),
+        (r'^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(', 'arrow_func'),
+        (r'^\s*(?:public|private|protected)?\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*[:{]', 'method'),
+    ],
+    "javascript": [
+        (r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)', 'function'),
+        (r'^\s*(?:export\s+)?class\s+(\w+)', 'class'),
+        (r'^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(', 'arrow_func'),
+        (r'^\s*(\w+)\s*\([^)]*\)\s*{', 'method'),
+    ],
+    "go": [
+        (r'^\s*func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(', 'func'),
+        (r'^\s*type\s+(\w+)\s+struct\s*{', 'struct'),
+        (r'^\s*type\s+(\w+)\s+interface\s*{', 'interface'),
+        (r'^\s*type\s+(\w+)\s+', 'type'),
+    ],
+    "rust": [
+        (r'^\s*(?:pub\s+)?fn\s+(\w+)', 'fn'),
+        (r'^\s*(?:pub\s+)?struct\s+(\w+)', 'struct'),
+        (r'^\s*(?:pub\s+)?enum\s+(\w+)', 'enum'),
+        (r'^\s*(?:pub\s+)?trait\s+(\w+)', 'trait'),
+        (r'^\s*impl(?:<[^>]+>)?\s+(?:(\w+)\s+for\s+)?(\w+)', 'impl'),
+        (r'^\s*(?:pub\s+)?mod\s+(\w+)', 'mod'),
+    ],
+    "java": [
+        (r'^\s*(?:public\s+|private\s+|protected\s+)?(?:static\s+)?(?:final\s+)?class\s+(\w+)', 'class'),
+        (r'^\s*(?:public\s+|private\s+|protected\s+)?interface\s+(\w+)', 'interface'),
+        (r'^\s*(?:public\s+|private\s+|protected\s+)?(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:\w+(?:<[^>]+>)?\s+)?(\w+)\s*\([^)]*\)\s*(?:throws\s+\w+(?:,\s*\w+)*)?\s*{', 'method'),
+    ],
+    "kotlin": [
+        (r'^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:data\s+)?class\s+(\w+)', 'class'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?interface\s+(\w+)', 'interface'),
+        (r'^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:suspend\s+)?fun\s+(\w+)', 'fun'),
+        (r'^\s*object\s+(\w+)', 'object'),
+    ],
+}
+
+
+def _extract_symbols_regex(content: str, language: str) -> List[str]:
+    """Extract symbol names from code using regex patterns."""
+    patterns = SYMBOL_PATTERNS.get(language, [])
+    if not patterns:
+        return []
+
+    symbols = []
+    for line in content.split('\n'):
+        for pattern, _ in patterns:
+            match = re.match(pattern, line)
+            if match:
+                # Get all captured groups (some patterns have multiple)
+                for group in match.groups():
+                    if group:
+                        symbols.append(group)
+                break
+    return symbols[:10]  # Limit to 10 symbols
+
+
+def _find_block_boundaries(lines: List[str], language: str) -> List[Tuple[int, int, List[str]]]:
+    """Find function/class block boundaries using regex and brace/indent counting.
+
+    Returns list of (start_line, end_line, symbols) tuples (1-indexed).
+    """
+    patterns = SYMBOL_PATTERNS.get(language, [])
+    if not patterns:
+        return []
+
+    spans = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        matched_symbol = None
+
+        for pattern, _ in patterns:
+            match = re.match(pattern, line)
+            if match:
+                for group in match.groups():
+                    if group:
+                        matched_symbol = group
+                        break
+                if matched_symbol:
+                    break
+
+        if matched_symbol:
+            start_line = i + 1  # 1-indexed
+            # Find end of block by counting braces
+            brace_count = 0
+            found_open = False
+            end_line = start_line
+
+            for j in range(i, len(lines)):
+                for char in lines[j]:
+                    if char == '{':
+                        brace_count += 1
+                        found_open = True
+                    elif char == '}':
+                        brace_count -= 1
+
+                if found_open and brace_count == 0:
+                    end_line = j + 1  # 1-indexed
+                    break
+                end_line = j + 1
+
+            # For languages without braces (like Python), use indentation
+            if not found_open and language in ("python",):
+                base_indent = len(line) - len(line.lstrip())
+                for j in range(i + 1, len(lines)):
+                    current_line = lines[j]
+                    if current_line.strip():
+                        current_indent = len(current_line) - len(current_line.lstrip())
+                        if current_indent <= base_indent:
+                            end_line = j  # Don't include this line
+                            break
+                    end_line = j + 1
+
+            spans.append((start_line, end_line, [matched_symbol]))
+            i = end_line
+        else:
+            i += 1
+
+    return spans
+
+
+def _chunk_with_spans(
+    *,
+    file_path: Path,
+    lines: List[str],
+    spans: List[Tuple[int, int, List[str]]],
+    last_modified: float,
+    language: str,
+) -> List[CodeChunk]:
+    """Chunk file using pre-computed spans (from regex or other parsing).
+
+    Similar to _chunk_python_ast but works with any span list.
+    """
+    spans = sorted(spans, key=lambda x: (x[0], x[1]))
+    chunks: List[CodeChunk] = []
+    total_lines = len(lines)
+    cur = 1
+
+    for start, end, symbols in spans:
+        start = max(1, start)
+        end = min(total_lines, end)
+
+        # Handle gap before this span
+        if start > cur:
+            gap = "\n".join(lines[cur - 1:start - 1])
+            if gap.strip():
+                chunks.extend(
+                    _chunk_by_lines(
+                        file_path=file_path,
+                        lines=lines,
+                        start_line=cur,
+                        end_line=start - 1,
+                        last_modified=last_modified,
+                        language=language,
+                        symbols=[],
+                    )
+                )
+
+        block_text = "\n".join(lines[start - 1:end])
+        if not block_text.strip():
+            cur = max(cur, end + 1)
+            continue
+
+        # Large blocks get sub-chunked
+        if len(block_text) > MAX_CHUNK_SIZE:
+            chunks.extend(
+                _chunk_by_lines(
+                    file_path=file_path,
+                    lines=lines,
+                    start_line=start,
+                    end_line=end,
+                    last_modified=last_modified,
+                    language=language,
+                    symbols=symbols,
+                )
+            )
+        else:
+            chunks.append(
+                CodeChunk(
+                    file_path=str(file_path),
+                    start_line=start,
+                    end_line=end,
+                    content=block_text,
+                    chunk_hash=hash_content(f"{file_path}:{start}:{block_text}"),
+                    symbols=symbols,
+                    language=language,
+                    last_modified=last_modified,
+                )
+            )
+
+        cur = max(cur, end + 1)
+
+    # Handle trailing content
+    if cur <= total_lines:
+        tail = "\n".join(lines[cur - 1:])
+        if tail.strip():
+            chunks.extend(
+                _chunk_by_lines(
+                    file_path=file_path,
+                    lines=lines,
+                    start_line=cur,
+                    end_line=total_lines,
+                    last_modified=last_modified,
+                    language=language,
+                    symbols=[],
+                )
+            )
+
+    return chunks
 
 
 def _chunk_by_lines(
@@ -274,7 +537,13 @@ def should_skip_dir(dir_name: str) -> bool:
 
 
 def chunk_file(file_path: Path) -> List[CodeChunk]:
-    """Split a file into chunks."""
+    """Split a file into chunks.
+
+    Uses language-aware chunking:
+    - Python: AST-based chunking (most accurate)
+    - Swift, TypeScript, JavaScript, Go, Rust, Java, Kotlin: Regex-based
+    - Other languages: Line-based with symbol extraction
+    """
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -289,13 +558,38 @@ def chunk_file(file_path: Path) -> List[CodeChunk]:
         last_modified = 0.0
 
     language = _language_for_path(file_path)
+    lines = content.split("\n")
 
+    # Python: Use AST-based chunking (most accurate)
     if file_path.suffix.lower() == ".py":
         ast_chunks = _chunk_python_ast(file_path, content, last_modified=last_modified)
         if ast_chunks is not None:
             return ast_chunks
 
-    lines = content.split("\n")
+    # Languages with regex patterns: Use structure-aware chunking
+    if language in SYMBOL_PATTERNS:
+        spans = _find_block_boundaries(lines, language)
+        if spans:
+            return _chunk_with_spans(
+                file_path=file_path,
+                lines=lines,
+                spans=spans,
+                last_modified=last_modified,
+                language=language,
+            )
+        # Fall back to line-based but extract symbols
+        symbols = _extract_symbols_regex(content, language)
+        return _chunk_by_lines(
+            file_path=file_path,
+            lines=lines,
+            start_line=1,
+            end_line=len(lines),
+            last_modified=last_modified,
+            language=language,
+            symbols=symbols,
+        )
+
+    # Other languages: Line-based chunking
     return _chunk_by_lines(
         file_path=file_path,
         lines=lines,

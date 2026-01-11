@@ -10,8 +10,9 @@ from typing import List, Optional, Tuple, Dict
 import chromadb
 from chromadb.config import Settings
 
-from .chunker import CodeChunk
+from .chunker import CodeChunk, build_rich_text
 from .embedder import get_embeddings, get_embedding, check_ollama, check_model
+from .query_expander import expand_query, is_natural_language_query
 
 # Store data in ~/.grepl
 GREPPY_DIR = Path.home() / ".grepl"
@@ -81,27 +82,34 @@ def index_chunks(project_path: Path, chunks: List[CodeChunk], batch_size: int = 
         batch.append(chunk)
 
         if len(batch) >= batch_size:
-            _index_batch(collection, batch)
+            _index_batch(collection, batch, project_path)
             total_indexed += len(batch)
             batch = []
 
     # Index remaining
     if batch:
-        _index_batch(collection, batch)
+        _index_batch(collection, batch, project_path)
         total_indexed += len(batch)
 
     return total_indexed
 
 
-def _index_batch(collection, chunks: List[CodeChunk]):
-    """Index a batch of chunks."""
-    texts = [c.content for c in chunks]
-    embeddings = get_embeddings(texts)
+def _index_batch(collection, chunks: List[CodeChunk], project_root: Optional[Path] = None):
+    """Index a batch of chunks.
+
+    Uses enriched text (with metadata) for embedding while storing raw content for display.
+    """
+    # Build rich text for embedding (includes language, file path, symbols)
+    rich_texts = [build_rich_text(c, project_root) for c in chunks]
+    embeddings = get_embeddings(rich_texts)
+
+    # Store raw content as documents (for display), but embed rich text
+    raw_texts = [c.content for c in chunks]
 
     collection.add(
         ids=[c.id for c in chunks],
         embeddings=embeddings,
-        documents=texts,
+        documents=raw_texts,
         metadatas=[
             {
                 "file_path": c.file_path,
@@ -117,13 +125,81 @@ def _index_batch(collection, chunks: List[CodeChunk]):
     )
 
 
-def search(project_path: Path, query: str, limit: int = 10) -> List[dict]:
-    """Search indexed codebase."""
+def search(project_path: Path, query: str, limit: int = 10, use_expansion: bool = True) -> List[dict]:
+    """Search indexed codebase.
+
+    Args:
+        project_path: Path to the project root
+        query: Search query
+        limit: Maximum number of results
+        use_expansion: Whether to expand natural language queries
+
+    Returns:
+        List of search results with scores
+    """
     collection = get_collection(project_path)
 
     if collection.count() == 0:
         return []
 
+    # Expand query for natural language searches
+    if use_expansion and is_natural_language_query(query):
+        queries = expand_query(query, max_expansions=3)
+        query_embeddings = get_embeddings(queries)
+
+        # Query with each embedding and merge results
+        all_results: Dict[str, dict] = {}
+        for i, qe in enumerate(query_embeddings):
+            results = collection.query(
+                query_embeddings=[qe],
+                n_results=limit,
+                include=["documents", "metadatas", "distances"],
+            )
+            # Merge results, keeping best score per chunk
+            for j in range(len(results["ids"][0])):
+                chunk_id = results["ids"][0][j]
+                distance = float(results["distances"][0][j])
+                score = 1.0 - (distance / 2.0) if distance <= 2.0 else 1.0 / (1.0 + distance)
+                score = max(0.0, min(1.0, score))
+
+                if chunk_id not in all_results or score > all_results[chunk_id]["score"]:
+                    all_results[chunk_id] = {
+                        "id": chunk_id,
+                        "document": results["documents"][0][j],
+                        "metadata": results["metadatas"][0][j],
+                        "score": score,
+                    }
+
+        # Sort by score and take top results
+        sorted_results = sorted(all_results.values(), key=lambda x: x["score"], reverse=True)[:limit]
+
+        # Format results
+        formatted = []
+        for r in sorted_results:
+            meta = r["metadata"] or {}
+            symbols = meta.get("symbols")
+            if isinstance(symbols, str):
+                try:
+                    symbols = json.loads(symbols)
+                except Exception:
+                    symbols = [s for s in symbols.split(",") if s]
+            if not isinstance(symbols, list):
+                symbols = []
+
+            formatted.append({
+                "file_path": meta.get("file_path"),
+                "start_line": meta.get("start_line"),
+                "end_line": meta.get("end_line"),
+                "content": r["document"],
+                "score": r["score"],
+                "symbols": symbols,
+                "language": meta.get("language") or "",
+                "last_modified": float(meta.get("last_modified") or 0.0),
+            })
+
+        return formatted
+
+    # Single query (no expansion)
     query_embedding = get_embedding(query)
 
     results = collection.query(

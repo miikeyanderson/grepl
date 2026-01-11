@@ -13,7 +13,13 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import __version__
-from .embedder import check_ollama, check_model
+from .embedder import (
+    check_ollama,
+    check_model,
+    get_backend_info,
+    list_available_backends,
+    set_preferred_backend,
+)
 from .chunker import chunk_codebase, chunk_file, collect_file_metadata
 from .store import (
     index_chunks,
@@ -90,6 +96,7 @@ class GreplGroup(click.Group):
             ("ls", "List directory with tree structure", "grepl ls src/", False),
             ("index", "Index codebase", "grepl index", False),
             ("status", "Check index status", "grepl status", False),
+            ("model", "Manage embedding models", "grepl model", False),
             ("clear", "Clear search index", "grepl clear", False),
         ]
 
@@ -254,7 +261,7 @@ def index(path: str, force: bool):
             batch_size = 50
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i:i+batch_size]
-                _index_batch(collection, batch)
+                _index_batch(collection, batch, project_path)
             progress.update(task, description="Done")
 
         format_index_progress(f"Indexed {len(chunks)} chunks", done=True)
@@ -1427,6 +1434,80 @@ def status(path: str, json_output: bool):
         semantic_ready=stats.get("semanticReady", False),
         semantic_reason=stats.get("semanticReadyReason"),
     )
+
+
+@main.group(invoke_without_command=True)
+@click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
+@click.pass_context
+def model(ctx, json_output: bool):
+    """Manage embedding model backends.
+
+    Run without arguments to show current backend and available options.
+    Use 'grepl model use <backend>' to switch backends.
+    """
+    if ctx.invoked_subcommand is None:
+        backend_info = get_backend_info()
+        available_backends = list_available_backends()
+
+        if json_output:
+            print(json.dumps({
+                "current": backend_info,
+                "available": available_backends,
+            }, indent=2))
+            return
+
+        label = badge("MODEL", Colors.BRIGHT_CYAN)
+        print(f"\n{label} {dim('Embedding Backend')}\n")
+
+        current_backend = backend_info["backend"]
+        current_model = backend_info["model"]
+        is_available = backend_info["available"]
+
+        status_icon = green("✓") if is_available else yellow("○")
+        print(f"  {dim('Current:')} {status_icon} {green(current_backend)} {dim('─')} {cyan(current_model)}")
+        print(f"  {dim('Dimensions:')} {backend_info['dimensions']}")
+
+        if current_backend == "ollama" and "url" in backend_info:
+            print(f"  {dim('URL:')} {backend_info['url']}")
+
+        print(f"\n  {dim('Available Backends:')}\n")
+
+        for be in available_backends:
+            icon = green("✓") if be["available"] else dim("○")
+            name_display = green(be["name"]) if be["available"] else dim(be["name"])
+            model_display = cyan(be["model"]) if be["available"] else dim(be["model"])
+            reason_display = dim(f"({be['reason']})")
+
+            prefix = "├──" if be != available_backends[-1] else "└──"
+            print(f"  {dim(prefix)} {icon} {name_display:8} {dim('─')} {model_display:30} {reason_display}")
+
+        print(f"\n  {dim('Switch backend:')} {cyan('grepl model use <backend>')}")
+        print(f"  {dim('Example:')} {cyan('grepl model use ollama')}\n")
+
+
+@model.command(name="use")
+@click.argument("backend", type=click.Choice(["openai", "ollama"], case_sensitive=False))
+def model_use(backend: str):
+    """Switch to a different embedding backend."""
+    backend = backend.lower()
+
+    available_backends = list_available_backends()
+    backend_obj = next((b for b in available_backends if b["name"] == backend), None)
+
+    if not backend_obj:
+        print(format_error(f"Unknown backend: {backend}"))
+        sys.exit(1)
+
+    if not backend_obj["available"]:
+        print(format_error(f"Backend '{backend}' is not available"))
+        print(f"  {dim('Reason:')} {backend_obj['reason']}")
+        sys.exit(1)
+
+    set_preferred_backend(backend)
+
+    label = badge("MODEL", Colors.BRIGHT_CYAN)
+    print(f"{label} {green('Switched to')} {cyan(backend)} {dim('─')} {dim(backend_obj['model'])}")
+    print(f"\n  {yellow('Note:')} {dim('You may need to reindex with')} {cyan('grepl index . --force')} {dim('if switching between backends')}\n")
 
 
 @main.command()

@@ -1,6 +1,6 @@
 [project]
 name = "grepl"
-version = "0.2.11"
+version = "0.2.12"
 description = "Explainable code search for humans and AI"
 readme = "README.md"
 requires-python = ">=3.9"
