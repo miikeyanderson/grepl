@@ -386,9 +386,19 @@ def _extract_symbols(text: str) -> List[str]:
 def _grep_matches_to_hits(
     matches: List[dict],
     *,
-    grep_score: float = 1.0,
+    pattern: str,
+    base_score: float = 1.0,
 ) -> List[Hit]:
+    import math
+
     hits: List[Hit] = []
+
+    clean_pattern = pattern[4:] if pattern.startswith("(?i)") else pattern
+    if not any(c in clean_pattern for c in r'.*+?[](){}|\\'):
+        search_terms = re.findall(r'\w+', clean_pattern.lower())
+    else:
+        search_terms = [re.sub(r'[.*+?\\[\](){}|^$]', '', clean_pattern.lower())]
+
     for m in matches:
         file_path = m["file_path"]
         line = m["line"]
@@ -408,6 +418,32 @@ def _grep_matches_to_hits(
             start_line, end_line, _, _ = bounds
 
         preview = "".join(lines[start_line - 1:end_line]).rstrip("\n")
+        preview_lower = preview.lower()
+
+        score = 0.0
+
+        total_matches = 0
+        if search_terms:
+            for term in search_terms:
+                if term:
+                    total_matches += preview_lower.count(term)
+            if total_matches > 0:
+                tf_score = min(0.7, 0.3 + (0.4 * math.log(1 + total_matches) / math.log(10)))
+                score += tf_score
+
+        file_name = Path(file_path).name.lower()
+        for term in search_terms:
+            if term and term in file_name:
+                score += 0.2
+                break
+
+        num_lines = end_line - start_line + 1
+        if num_lines > 0 and search_terms and total_matches > 0:
+            matches_per_line = total_matches / num_lines
+            score += min(0.1, matches_per_line * 0.05)
+
+        final_score = min(1.0, score * base_score)
+
         symbols = _extract_symbols(preview)
         hits.append(
             Hit(
@@ -418,7 +454,7 @@ def _grep_matches_to_hits(
                 score=0.0,
                 preview=preview,
                 symbols=symbols,
-                grep_score=float(grep_score),
+                grep_score=final_score,
                 semantic_score=0.0,
             )
         )
@@ -715,7 +751,7 @@ def find_cmd(
     if plan.run_grep and plan.grep_pattern:
         max_grep = max(50, min(500, top_k * 25))
         matches = _run_rg(plan.grep_pattern, project_path, fixed=plan.grep_fixed, max_results=max_grep, exts=exts)
-        grep_hits = _grep_matches_to_hits(matches, grep_score=grep_hit_score)
+        grep_hits = _grep_matches_to_hits(matches, pattern=plan.grep_pattern, base_score=grep_hit_score)
 
     # Semantic
     if plan.run_semantic and plan.semantic_query:
